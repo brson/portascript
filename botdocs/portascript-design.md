@@ -69,6 +69,17 @@ Leading whitespace is stripped based on closing `"""` indentation (like Rust raw
 
 Escape sequences in double-quoted strings: `\n` `\t` `\\` `\{` `\"`.
 
+Raw multiline strings use triple single quotes. No interpolation, no escaping.
+
+```portascript
+let dockerfile = '''
+    FROM ubuntu:24.04
+    RUN echo ${SOME_SHELL_VAR}
+    '''
+```
+
+Same leading-whitespace stripping as `"""`.
+
 ### Identifiers
 
 `[a-zA-Z_][a-zA-Z0-9_]*`
@@ -123,48 +134,54 @@ env.MY_VAR = "value"           # set for this process + children
 Scoped env for a single command:
 
 ```portascript
+run [RUST_LOG="debug"] echo {msg}
 exec [RUST_LOG="debug"] cargo build
 ```
 
 ## Commands
 
-### Builtins (uutils)
+Portascript has two worlds: **commands** and **expressions**.
+Commands are CLI-statement-oriented -- a keyword followed by
+space-separated string arguments. Expressions are typed values
+with function call syntax. The boundary between them is explicit
+and always marked by a keyword or operator.
 
-Bare command names invoke uutils builtins. These run in-process.
+### `run` -- uutils builtins
+
+The `run` keyword invokes uutils builtins in-process.
 
 ```portascript
-echo "hello"
-ls -la /tmp
-cp source.txt dest.txt
-sort data.txt
-cat file1.txt file2.txt
-head -n 10 log.txt
-mkdir -p /tmp/work
-rm -rf /tmp/work
-mv old.txt new.txt
-chmod 755 script.sh
-wc -l file.txt
-basename /foo/bar.txt
-dirname /foo/bar.txt
-touch newfile.txt
-tr "a-z" "A-Z"
-cut -d: -f1
-tee output.log
-uniq
-seq 1 10
-yes
-true
-false
+run echo "hello"
+run ls -la /tmp
+run cp source.txt dest.txt
+run sort data.txt
+run cat file1.txt file2.txt
+run head -n 10 log.txt
+run mkdir -p /tmp/work
+run rm -rf /tmp/work
+run mv old.txt new.txt
+run chmod 755 script.sh
+run wc -l file.txt
+run basename /foo/bar.txt
+run dirname /foo/bar.txt
+run touch newfile.txt
+run tr "a-z" "A-Z"
+run cut -d: -f1
+run tee output.log
+run uniq
+run seq 1 10
+run yes
+run true
+run false
 ```
 
 The full set of builtins matches what uutils provides.
 Arguments follow standard unix conventions (flags, operands).
-Arguments are strings -- variables interpolate via `{}`.
+Arguments are strings -- expression values interpolate via `{expr}`.
 
-### External commands
+### `exec` -- external commands
 
-The `exec` keyword invokes external (system) commands. This makes it
-explicit when you're leaving the portable sandbox.
+The `exec` keyword spawns a child process via `std::process::Command`.
 
 ```portascript
 exec git status
@@ -172,46 +189,275 @@ exec cargo build --release
 exec python3 script.py
 ```
 
-`exec` spawns a child process on all platforms via Rust's `std::process::Command`.
 No `fork()` dependency. Works uniformly on Windows.
 
-### Why the distinction matters
+### Why two keywords
 
-- **Readability.** You can instantly see which commands are portable (builtins)
-  and which depend on the system (exec).
-- **Performance.** Builtins run in-process. No spawn overhead.
-- **Portability auditing.** `grep -c "^exec " script.psc` tells you
+- **Visual clarity.** Every command invocation is marked. A line starting
+  with `run` or `exec` is a command. Anything else is control flow or
+  an expression. No ambiguity.
+- **Portability auditing.** `rg -c "^exec " script.psc` tells you
   how platform-dependent a script is.
+- **Parser simplicity.** The parser doesn't need a table of builtin names
+  to decide whether a bare word is a command. `run` and `exec` switch
+  the parser into command mode; everything after is args until newline or `|`.
 
-## Pipelines
+### Command arguments
+
+After `run <name>` or `exec <name>`, everything until end of line
+(or `|` or `?`) is parsed in **command mode**: bare words, flags,
+quoted strings, and `{expr}` interpolations are all valid.
+
+```portascript
+let name = "world"
+run echo "hello {name}"       # interpolated string arg
+run echo -n {name}            # expression arg (coerced to string)
+run cp {src} {dst}            # two expression args
+exec git log --oneline -n 5   # bare flags and words
+```
+
+All expression values are coerced to string when used as command arguments.
+
+### List spread in command arguments
+
+`{list...}` spreads a list variable into individual arguments.
+Each element is coerced to string. An empty list inserts nothing.
+
+```portascript
+let extra_flags = ["--verbose", "--color"]
+exec cargo build {extra_flags...}
+# equivalent to: exec cargo build --verbose --color
+
+let empty = []
+run echo "hello" {empty...} "world"
+# equivalent to: run echo "hello" "world"
+```
+
+### Command modifier bracket `[...]`
+
+A bracket block before the command name sets per-command modifiers:
+environment variables and stdin source.
+
+```portascript
+# Environment variables (scoped to this command only)
+exec [RUST_LOG="debug"] cargo build
+run [LC_ALL="C"] sort data.txt
+
+# Stdin from an expression value
+exec [stdin={dockerfile}] podman build -f - {ctx}
+run [stdin={data}] sort
+
+# Both together
+exec [stdin={payload}, CONTENT_TYPE="application/json"] curl -X POST -d @- {url}
+```
+
+`stdin={expr}` feeds the string value of `expr` as the command's stdin,
+replacing whatever stdin the command would otherwise inherit.
+This is the typed-world-to-command-world bridge for input data.
+
+## I/O Model
+
+Commands live in a process-oriented world of byte streams and exit codes.
+Expressions live in a typed world of values. The I/O model defines how
+data crosses between these worlds.
+
+### What a command produces
+
+Every command (both `run` and `exec`) produces three things:
+
+1. **Exit code** -- int, 0 = success, nonzero = failure
+2. **stdout** -- byte stream (text)
+3. **stderr** -- byte stream (text)
+
+### Default behavior (bare command)
+
+```portascript
+run echo "hello"           # stdout -> script's stdout (terminal)
+exec cargo build           # stderr -> script's stderr (terminal)
+                           # nonzero exit code -> script aborts
+```
+
+| Stream | Destination |
+|--------|-------------|
+| stdout | Script's stdout (passthrough) |
+| stderr | Script's stderr (passthrough) |
+| exit code | Nonzero aborts the script |
+
+This is the `set -e` + `set -o pipefail` equivalent, but always on.
+
+### `$()` -- capture stdout as a value
+
+```portascript
+let files = $(run ls /src)
+let branch = $(exec git branch --show-current)
+let count = $(run cat data | run wc -l)     # pipelines work inside $()
+```
+
+| Stream | Destination |
+|--------|-------------|
+| stdout | Captured as trimmed string -> expression value |
+| stderr | Script's stderr (passthrough) |
+| exit code | Nonzero aborts the script |
+
+`$()` is the primary command-to-expression bridge. It takes a stream
+of bytes and produces a `str` value. The caller then uses expression-world
+functions (`int()`, `split()`, `lines()`, `trim()`) to parse it further.
+
+### `try` -- capture everything as a result map
+
+```portascript
+let result = try exec git push
+```
+
+| Stream | Destination |
+|--------|-------------|
+| stdout | Captured -> `result.stdout` (str) |
+| stderr | Captured -> `result.stderr` (str) |
+| exit code | Captured -> `result.code` (int), `result.ok` (bool) |
+
+`try` never aborts. It wraps the entire command outcome into a map value
+with four fields: `.ok` (bool), `.code` (int), `.stdout` (str), `.stderr` (str).
+
+```portascript
+let r = try exec git push
+if r.ok {
+    run echo "pushed"
+} else {
+    eprintln("push failed ({r.code}): {r.stderr}")
+}
+```
+
+`try` also works with `run`:
+
+```portascript
+let r = try run cat nonexistent.txt
+if not r.ok {
+    run echo "file not found"
+}
+```
+
+### `?` -- suppress failure
+
+```portascript
+run rm tempfile.txt ?        # don't care if it doesn't exist
+exec git stash pop ?         # might not have a stash
+```
+
+| Stream | Destination |
+|--------|-------------|
+| stdout | Script's stdout (passthrough) |
+| stderr | Script's stderr (passthrough) |
+| exit code | Ignored -- execution continues regardless |
+
+`?` is shorthand for "run it, don't care if it fails." No output capture.
+
+### Summary table
+
+| Construct | stdout | stderr | exit != 0 |
+|-----------|--------|--------|-----------|
+| `run cmd` / `exec cmd` | passthrough | passthrough | abort |
+| `run cmd ?` / `exec cmd ?` | passthrough | passthrough | ignore |
+| `$(run cmd)` / `$(exec cmd)` | -> str value | passthrough | abort |
+| `try run cmd` / `try exec cmd` | -> `.stdout` | -> `.stderr` | -> `.code` |
+
+### Pipelines
 
 Pipelines connect stdout of one command to stdin of the next.
 
 ```portascript
-cat data.txt | sort | uniq | wc -l
+run cat data.txt | run sort | run uniq | run wc -l
 ```
 
-Builtin-to-builtin pipes are in-process (no OS pipe).
-When an `exec` command participates, OS pipes connect the processes.
+`run`-to-`run` pipes are in-process (no OS pipe). Each stage runs
+in a thread, connected by bounded channels.
+
+When `exec` participates, OS pipes connect to the child process:
 
 ```portascript
-exec git log --oneline | head -n 5
-cat urls.txt | exec xargs curl -s | sort
+exec git log --oneline | run head -n 5
+run cat urls.txt | exec xargs curl -s | run sort
 ```
 
 Pipeline failure: if any stage fails, the entire pipeline fails
-(bash `pipefail` semantics, but always on).
+(always-on pipefail). The exit code of a pipeline is the exit code
+of the first stage that fails, or 0 if all succeed.
 
-### Capture
-
-Capture command output into a variable with `$()`:
+Pipelines work with all capture operators:
 
 ```portascript
-let files = $(ls /src)              # stdout as string, trimmed
-let count = $(cat data | wc -l)     # pipelines work inside $()
+# Capture pipeline output
+let top5 = $(exec git log --oneline | run head -n 5)
+
+# Try a pipeline
+let r = try run cat data | exec grep "pattern"
+if not r.ok {
+    run echo "no matches"
+}
+
+# Suppress pipeline failure
+run cat maybe.txt ? | run sort | run head -n 1
 ```
 
-`$()` captures stdout as a trimmed string. Stderr passes through to the script's stderr.
+### Stdin
+
+A command's stdin comes from one of three sources, in priority order:
+
+1. **Pipe** -- if the command is not the first stage of a pipeline,
+   stdin comes from the previous stage's stdout.
+2. **`[stdin={expr}]`** -- if the modifier bracket specifies stdin,
+   the expression value (coerced to string, encoded as UTF-8) is fed
+   as the command's stdin.
+3. **Script's stdin** -- the default. The command inherits the script's
+   stdin (typically the terminal, or whatever was piped to the script).
+
+```portascript
+# Pipe: sort reads from cat's stdout
+run cat data.txt | run sort
+
+# Explicit stdin: feed a string variable
+exec [stdin={dockerfile}] podman build -f - {ctx}
+run [stdin={csv_data}] sort -t, -k2
+
+# Script's stdin: interactive or piped
+run cat                          # reads from terminal / script's stdin
+```
+
+### Type conversions at the boundary
+
+**Entering command world (expression -> command args / stdin):**
+
+All values coerce to string silently. This is the only implicit
+coercion in the language and it happens exclusively at the
+command boundary.
+
+| Type | String coercion |
+|------|----------------|
+| str | identity |
+| int | decimal representation (`42`) |
+| float | decimal representation (`3.14`) |
+| bool | `"true"` / `"false"` |
+| list | runtime error (use `{list...}` spread or `join()`) |
+| map | runtime error (not meaningful as a command arg) |
+
+**Leaving command world (command output -> expression):**
+
+`$()` and `try` produce string values. Further parsing is always explicit:
+
+```portascript
+# $() gives a string -- parse it yourself
+let count_str = $(run wc -l < data.txt)
+let count = int(count_str)
+
+# Or chain it
+let count = int($(run cat data.txt | run wc -l))
+
+# try gives a result map -- fields are already typed
+let r = try exec git rev-parse HEAD
+# r.ok is bool, r.code is int, r.stdout is str, r.stderr is str
+```
+
+No magic parsing. If a command outputs `"42\n"`, `$()` gives you
+the string `"42"` (trimmed). You call `int()` if you want a number.
 
 ## Operators
 
@@ -239,7 +485,7 @@ pipeline/command chaining.
 
 ```portascript
 if x > 0 and x < 100 {
-    echo "in range"
+    run echo "in range"
 }
 ```
 
@@ -265,11 +511,11 @@ let val = env.FOO ?? "default"
 
 ```portascript
 if count > 0 {
-    echo "positive"
+    run echo "positive"
 } elif count == 0 {
-    echo "zero"
+    run echo "zero"
 } else {
-    echo "negative"
+    run echo "negative"
 }
 ```
 
@@ -282,22 +528,22 @@ Iterate over lists, glob results, or lines:
 ```portascript
 # over a list
 for f in ["a.txt", "b.txt", "c.txt"] {
-    cat {f}
+    run cat {f}
 }
 
 # over glob results
 for f in glob("src/**/*.rs") {
-    wc -l {f}
+    run wc -l {f}
 }
 
 # over lines of a string
-for line in lines($(cat data.txt)) {
-    echo "line: {line}"
+for line in lines($(run cat data.txt)) {
+    run echo "line: {line}"
 }
 
 # over a range
 for i in range(1, 10) {
-    echo {i}
+    run echo {i}
 }
 ```
 
@@ -306,7 +552,7 @@ for i in range(1, 10) {
 ```portascript
 let mut i = 0
 while i < 10 {
-    echo {i}
+    run echo {i}
     i = i + 1
 }
 ```
@@ -319,10 +565,10 @@ Work in `for` and `while`. No labels.
 
 ```portascript
 match ext {
-    "rs" => echo "rust"
-    "py" => echo "python"
-    "js" | "ts" => echo "javascript"
-    _ => echo "unknown"
+    "rs" => run echo "rust"
+    "py" => run echo "python"
+    "js" | "ts" => run echo "javascript"
+    _ => run echo "unknown"
 }
 ```
 
@@ -330,47 +576,16 @@ No fallthrough.
 
 ## Error Handling
 
-Commands (both builtins and exec) that return nonzero exit codes
+Commands (both `run` and `exec`) that return nonzero exit codes
 cause the script to abort with an error message. This is the default --
-no `set -e` required.
-
-### try
-
-Capture failure without aborting:
-
-```portascript
-let result = try exec git push
-if result.ok {
-    echo "pushed"
-} else {
-    echo "push failed with code {result.code}"
-    echo "stderr: {result.stderr}"
-}
-```
-
-`try` wraps a command and returns a result map with fields:
-- `.ok` -- bool, true if exit code 0
-- `.code` -- int, exit code
-- `.stdout` -- str, captured stdout
-- `.stderr` -- str, captured stderr
-
-### The ? operator
-
-Suffix `?` on a command to suppress failure (ignore nonzero exit).
-The command runs, errors are silently discarded, execution continues.
-
-```portascript
-rm tempfile.txt ?    # don't care if it doesn't exist
-```
-
-This is intentionally the opposite of Rust's `?` -- in a shell context,
-`?` meaning "don't care about this error" is more natural.
+no `set -e` required. See the I/O Model section above for `try`, `?`,
+and the full capture semantics.
 
 ## Functions
 
 ```portascript
 fn greet(name: str) {
-    echo "hello {name}"
+    run echo "hello {name}"
 }
 
 fn add(a: int, b: int) -> int {
@@ -380,7 +595,7 @@ fn add(a: int, b: int) -> int {
 # default arguments
 fn deploy(env: str, verbose: bool = false) {
     if verbose {
-        echo "deploying to {env}"
+        run echo "deploying to {env}"
     }
     exec rsync -az ./build/ "{env}:/app/"
 }
@@ -394,7 +609,7 @@ Functions can capture command output:
 
 ```portascript
 fn file_count(dir: str) -> int {
-    return int($(ls {dir} | wc -l))
+    return int($(run ls {dir} | run wc -l))
 }
 ```
 
@@ -428,7 +643,7 @@ These are portascript-native functions, distinct from uutils builtins.
 
 - `path.join(parts...)` -- OS-aware path join
 - `path.exists(p)` -- bool
-- `path.is_file(p)` / `path.is_dir(p)` -- bool
+- `path.is_file(p)` / `path.is_dir(p)` / `path.is_socket(p)` -- bool
 - `path.ext(p)` -- file extension
 - `path.stem(p)` -- filename without extension
 - `path.parent(p)` -- parent directory
@@ -439,20 +654,35 @@ These are portascript-native functions, distinct from uutils builtins.
 - `len(list)` -- length
 - `append(list, val)` -- returns new list with val appended
 - `list[i]` -- index access (0-based)
-- `list[i..j]` -- slice
+- `list[i..j]` -- slice (both bounds optional: `list[i..]`, `list[..j]`)
 
 ### Filesystem
 
 - `glob(pattern)` -- returns list of matching paths
 - `read(path)` -- read file contents as string
 - `write(path, content)` -- write string to file
+- `append_file(path, content)` -- append string to file
+- `tempfile()` -- create a temp file, return its path (auto-deleted on script exit)
 
 ### Other
 
 - `range(start, end)` / `range(end)` -- integer range for loops
 - `typeof(val)` -- returns type name as string
 - `error(msg)` -- abort script with message
+- `exit()` / `exit(code)` -- exit script with code (default 0)
 - `print(val)` -- print without newline (echo adds newline)
+- `eprintln(val)` -- print to stderr with newline
+- `eprint(val)` -- print to stderr without newline
+- `pid()` -- current process ID (int)
+- `command_exists(name)` -- check if an external command exists on PATH (bool)
+
+### Map operations
+
+- `map[key]` -- access value by string key
+- `map[key] = val` -- insert or update entry (map must be mutable)
+- `len(map)` -- number of entries
+- `keys(map)` -- list of keys (insertion order)
+- `has_key(map, key)` -- bool
 
 ## Process Model
 
@@ -550,21 +780,21 @@ flag can do a dry-run parse without execution for linting.
 
 ```
 Keyword:    let mut if elif else for in while break continue
-            fn return match try exec and or not true false env
+            fn return match try run exec and or not true false env
 Ident:      [a-zA-Z_][a-zA-Z0-9_]*
 Int:        [0-9]+
 Float:      [0-9]+\.[0-9]+
-String:     "..." or '...' or """..."""
+String:     "..." or '...' or """...""" or '''...'''
 Operator:   + - * / % == != < > <= >= = ??
 Symbol:     { } [ ] ( ) | ; , . .. => ? \n
 Bare:       anything else in command position (flags like -la, paths)
 Comment:    # to end of line (discarded)
 ```
 
-The key insight: after a command-position keyword (a builtin name,
-`exec`, or start of line), subsequent tokens are parsed in **command mode**
-where bare words and flags are valid. After `let`, `if`, `while`, `return`,
-tokens are parsed in **expression mode** where operators and precedence apply.
+The key insight: `run` and `exec` switch the parser into **command mode**
+where bare words and flags are valid. `let`, `if`, `while`, `return`,
+and function calls use **expression mode** where operators and precedence apply.
+No ambiguity -- the keyword at the start of a statement determines the mode.
 
 ## Grammar (Informal)
 
@@ -587,12 +817,13 @@ break_stmt  = "break"
 cont_stmt   = "continue"
 
 pipeline    = cmd_stmt ("|" cmd_stmt)+
-cmd_stmt    = builtin_cmd | exec_cmd | try_expr
-builtin_cmd = BUILTIN_NAME arg* "?"?
-exec_cmd    = "exec" ("[" env_pairs "]")? arg* "?"?
+cmd_stmt    = run_cmd | exec_cmd | try_expr
+run_cmd     = "run" ("[" modifiers "]")? IDENT arg* "?"?
+exec_cmd    = "exec" ("[" modifiers "]")? arg* "?"?
 try_expr    = "try" cmd_stmt
+modifiers   = (env_pair | "stdin" "=" expr) ("," (env_pair | "stdin" "=" expr))*
 
-arg         = STRING | BARE | "{" expr "}" | flag
+arg         = STRING | BARE | "{" expr "}" | "{" IDENT "..." "}" | flag
 expr        = ... (standard precedence climbing)
 block       = "{" stmt* "}"
 
@@ -711,9 +942,9 @@ impl Scope {
 
 ```portascript
 let project = "myapp"
-let version = trim($(cat VERSION))
+let version = trim($(run cat VERSION))
 
-echo "building {project} v{version}"
+run echo "building {project} v{version}"
 exec cargo build --release
 
 let binary = "target/release/{project}"
@@ -721,35 +952,35 @@ if not path.exists(binary) {
     error("build failed: {binary} not found")
 }
 
-let size = $(wc -c < {binary} | tr -d " ")
-echo "binary size: {size} bytes"
+let size = $(run wc -c {binary} | run tr -d " ")
+run echo "binary size: {size} bytes"
 
 let servers = ["web1.prod", "web2.prod"]
 for server in servers {
-    echo "deploying to {server}..."
+    run echo "deploying to {server}..."
     exec scp {binary} "{server}:/opt/{project}/bin/"
     exec ssh {server} "systemctl restart {project}"
 }
 
-echo "deployed v{version} to {len(servers)} servers"
+run echo "deployed v{version} to {len(servers)} servers"
 ```
 
 ### Log analysis
 
 ```portascript
 fn analyze_log(logfile: str) {
-    echo "=== {logfile} ==="
-    let total = int($(wc -l < {logfile}))
-    let errors = int($(cat {logfile} | grep -c "ERROR" ?))
-    let warnings = int($(cat {logfile} | grep -c "WARN" ?))
+    run echo "=== {logfile} ==="
+    let total = int($(run wc -l {logfile}))
+    let errors = int($(run cat {logfile} | exec grep -c "ERROR" ?))
+    let warnings = int($(run cat {logfile} | exec grep -c "WARN" ?))
 
-    echo "  total lines: {total}"
-    echo "  errors:      {errors}"
-    echo "  warnings:    {warnings}"
+    run echo "  total lines: {total}"
+    run echo "  errors:      {errors}"
+    run echo "  warnings:    {warnings}"
 
     if errors > 0 {
-        echo "  last 5 errors:"
-        cat {logfile} | grep "ERROR" | tail -n 5
+        run echo "  last 5 errors:"
+        run cat {logfile} | exec grep "ERROR" | run tail -n 5
     }
 }
 
@@ -764,18 +995,18 @@ for log in glob("/var/log/app/*.log") {
 let src = env.1 ?? "."
 let dest = env.2 ?? "./backup"
 
-mkdir -p {dest}
+run mkdir -p {dest}
 
 let mut copied = 0
 for f in glob("{src}/**/*.txt") {
     let rel = replace(f, src, "")
     let target = path.join(dest, rel)
-    mkdir -p $(dirname {target})
-    cp {f} {target}
+    run mkdir -p {path.parent(target)}
+    run cp {f} {target}
     copied = copied + 1
 }
 
-echo "copied {copied} files to {dest}"
+run echo "copied {copied} files to {dest}"
 ```
 
 ## CLI Interface
