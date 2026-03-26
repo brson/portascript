@@ -1,0 +1,14 @@
+[package]
+name = "portascript-cli"
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmx.workspace = true
+portascript.path = "../portascript"
+
+[[bin]]
+name = "portascript"
+path = "src/main.rs"
