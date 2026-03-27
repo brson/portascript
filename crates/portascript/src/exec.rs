@@ -3,13 +3,31 @@ use crate::value::Value;
 use crate::scope::Scope;
 use crate::PsError;
 
+/// Control flow signal from block execution.
+enum ControlFlow {
+    Normal,
+    Break,
+    Continue,
+    Return(Option<Value>),
+}
+
+/// A stored user-defined function.
+struct UserFunction {
+    params: Vec<(String, String)>, // (name, type_name)
+    _return_type: Option<String>,
+    body: Vec<Token>,
+}
+
 /// One-pass executor.
 pub struct Executor<'a> {
     stdout: &'a mut dyn std::io::Write,
     stderr: &'a mut dyn std::io::Write,
     peeked: Option<Token>,
     tokenizer: Option<Tokenizer>,
+    /// Stack of buffered token streams for block replay.
+    token_stack: Vec<(Vec<Token>, usize)>,
     scope: Scope,
+    functions: std::collections::HashMap<String, UserFunction>,
 }
 
 impl<'a> Executor<'a> {
@@ -22,20 +40,33 @@ impl<'a> Executor<'a> {
             stderr,
             peeked: None,
             tokenizer: None,
+            token_stack: Vec::new(),
             scope: Scope::new(),
+            functions: std::collections::HashMap::new(),
         }
     }
+
+    // --- Token access ---
 
     fn next_token(&mut self) -> Result<Token, PsError> {
         if let Some(tok) = self.peeked.take() {
             return Ok(tok);
+        }
+        // Read from token stack if replaying, otherwise from tokenizer.
+        if let Some((tokens, pos)) = self.token_stack.last_mut() {
+            if *pos < tokens.len() {
+                let tok = tokens[*pos].clone();
+                *pos += 1;
+                return Ok(tok);
+            }
+            return Ok(Token::Eof);
         }
         self.tokenizer.as_mut().unwrap().next_token()
     }
 
     fn peek_token(&mut self) -> Result<&Token, PsError> {
         if self.peeked.is_none() {
-            self.peeked = Some(self.tokenizer.as_mut().unwrap().next_token()?);
+            self.peeked = Some(self.next_token()?);
         }
         Ok(self.peeked.as_ref().unwrap())
     }
@@ -53,6 +84,21 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
+    fn next_cmd_token(&mut self) -> Result<Token, PsError> {
+        if let Some(tok) = self.peeked.take() {
+            return Ok(tok);
+        }
+        if let Some((tokens, pos)) = self.token_stack.last_mut() {
+            if *pos < tokens.len() {
+                let tok = tokens[*pos].clone();
+                *pos += 1;
+                return Ok(tok);
+            }
+            return Ok(Token::Eof);
+        }
+        self.tokenizer.as_mut().unwrap().next_cmd_token()
+    }
+
     fn pos(&self) -> (usize, usize) {
         if let Some(ref t) = self.tokenizer {
             (t.line, t.col)
@@ -61,39 +107,108 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Execute a source string.
-    pub fn run(&mut self, source: &str) -> Result<i32, PsError> {
-        self.tokenizer = Some(Tokenizer::new(source));
+    // --- Block buffering ---
+
+    /// Buffer tokens until the matching `}` for a `{` block.
+    /// Assumes the opening `{` has already been consumed.
+    fn buffer_block(&mut self) -> Result<Vec<Token>, PsError> {
+        let mut tokens = Vec::new();
+        let mut depth = 1;
         loop {
             let tok = self.next_token()?;
             match tok {
-                Token::Eof => return Ok(0),
-                Token::Newline | Token::Comment(_) => continue,
-                Token::Let => {
-                    self.exec_let()?;
+                Token::LBrace => {
+                    depth += 1;
+                    tokens.push(tok);
                 }
-                Token::Run => {
-                    self.exec_run()?;
+                Token::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(tokens);
+                    }
+                    tokens.push(tok);
                 }
-                Token::Exec => {
-                    self.exec_exec()?;
-                }
-                Token::Ident(name) => {
-                    self.exec_ident_stmt(name)?;
-                }
-                _ => {
+                Token::Eof => {
                     let (line, col) = self.pos();
                     return Err(PsError {
-                        message: format!("unexpected token {:?}", tok),
+                        message: "unexpected end of file in block".into(),
                         line,
                         col,
                     });
                 }
+                _ => tokens.push(tok),
             }
         }
     }
 
-    /// Execute `let [mut] name = expr`.
+    /// Execute a buffered block of tokens.
+    fn exec_block(&mut self, tokens: &[Token]) -> Result<ControlFlow, PsError> {
+        self.token_stack.push((tokens.to_vec(), 0));
+        self.scope.push();
+        let result = self.exec_statements();
+        self.scope.pop();
+        self.token_stack.pop();
+        self.peeked = None; // Clear stale peeked tokens from the buffer.
+        result
+    }
+
+    // --- Main execution loop ---
+
+    /// Execute a source string.
+    pub fn run(&mut self, source: &str) -> Result<i32, PsError> {
+        self.tokenizer = Some(Tokenizer::new(source));
+        match self.exec_statements()? {
+            ControlFlow::Normal => Ok(0),
+            ControlFlow::Return(_) => Ok(0),
+            _ => Ok(0),
+        }
+    }
+
+    /// Execute statements until Eof or a control flow signal.
+    fn exec_statements(&mut self) -> Result<ControlFlow, PsError> {
+        loop {
+            let tok = self.next_token()?;
+            if tok == Token::Eof {
+                return Ok(ControlFlow::Normal);
+            }
+            let cf = self.exec_stmt(tok)?;
+            match cf {
+                ControlFlow::Normal => continue,
+                other => return Ok(other),
+            }
+        }
+    }
+
+    /// Execute a single statement given its first token.
+    fn exec_stmt(&mut self, tok: Token) -> Result<ControlFlow, PsError> {
+        match tok {
+            Token::Eof => Ok(ControlFlow::Normal),
+            Token::Newline | Token::Comment(_) => Ok(ControlFlow::Normal),
+            Token::Let => { self.exec_let()?; Ok(ControlFlow::Normal) }
+            Token::Run => { self.exec_run()?; Ok(ControlFlow::Normal) }
+            Token::Exec => { self.exec_exec()?; Ok(ControlFlow::Normal) }
+            Token::If => self.exec_if(),
+            Token::While => self.exec_while(),
+            Token::For => self.exec_for(),
+            Token::Match => self.exec_match(),
+            Token::Fn => { self.exec_fn_def()?; Ok(ControlFlow::Normal) }
+            Token::Return => self.exec_return(),
+            Token::Break => Ok(ControlFlow::Break),
+            Token::Continue => Ok(ControlFlow::Continue),
+            Token::Ident(name) => { self.exec_ident_stmt(name)?; Ok(ControlFlow::Normal) }
+            _ => {
+                let (line, col) = self.pos();
+                Err(PsError {
+                    message: format!("unexpected token {:?}", tok),
+                    line,
+                    col,
+                })
+            }
+        }
+    }
+
+    // --- Statements ---
+
     fn exec_let(&mut self) -> Result<(), PsError> {
         let mut mutable = false;
         let tok = self.next_token()?;
@@ -106,8 +221,7 @@ impl<'a> Executor<'a> {
                         let (line, col) = self.pos();
                         return Err(PsError {
                             message: format!("expected identifier after 'mut', got {:?}", other),
-                            line,
-                            col,
+                            line, col,
                         });
                     }
                 }
@@ -117,8 +231,7 @@ impl<'a> Executor<'a> {
                 let (line, col) = self.pos();
                 return Err(PsError {
                     message: format!("expected identifier after 'let', got {:?}", other),
-                    line,
-                    col,
+                    line, col,
                 });
             }
         };
@@ -128,21 +241,18 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    /// Execute `run <builtin> <args...>` as a statement.
     fn exec_run(&mut self) -> Result<(), PsError> {
         let (code, _) = self.exec_run_inner(false)?;
         if code != 0 {
             let (line, col) = self.pos();
             return Err(PsError {
                 message: format!("run: exited with code {}", code),
-                line,
-                col,
+                line, col,
             });
         }
         Ok(())
     }
 
-    /// Inner run implementation. If `capture` is true, captures stdout and returns it.
     fn exec_run_inner(&mut self, capture: bool) -> Result<(i32, Option<String>), PsError> {
         let name_tok = self.next_cmd_token()?;
         let name = match name_tok {
@@ -151,147 +261,386 @@ impl<'a> Executor<'a> {
                 let (line, col) = self.pos();
                 return Err(PsError {
                     message: format!("expected builtin name after 'run', got {:?}", other),
-                    line,
-                    col,
+                    line, col,
                 });
             }
         };
-
         let args = self.parse_cmd_args()?;
         let (line, col) = self.pos();
-
         if capture {
             match crate::builtins::run_builtin_capture(&name, args) {
                 Some((code, stdout)) => Ok((code, Some(stdout))),
-                None => Err(PsError {
-                    message: format!("unknown builtin '{}'", name),
-                    line,
-                    col,
-                }),
+                None => Err(PsError { message: format!("unknown builtin '{}'", name), line, col }),
             }
         } else {
             match crate::builtins::run_builtin(&name, args) {
                 Some(code) => Ok((code, None)),
-                None => Err(PsError {
-                    message: format!("unknown builtin '{}'", name),
-                    line,
-                    col,
-                }),
+                None => Err(PsError { message: format!("unknown builtin '{}'", name), line, col }),
             }
         }
     }
 
-    /// Execute `exec <command> <args...>` as a statement.
     fn exec_exec(&mut self) -> Result<(), PsError> {
         let (code, _) = self.exec_exec_inner(false)?;
         if code != 0 {
             let (line, col) = self.pos();
             return Err(PsError {
                 message: format!("exec: exited with code {}", code),
-                line,
-                col,
+                line, col,
             });
         }
         Ok(())
     }
 
-    /// Inner exec implementation. If `capture` is true, captures stdout.
     fn exec_exec_inner(&mut self, capture: bool) -> Result<(i32, Option<String>), PsError> {
         let args = self.parse_cmd_args()?;
         let (line, col) = self.pos();
-
         if args.is_empty() {
-            return Err(PsError {
-                message: "exec: missing command".into(),
-                line,
-                col,
-            });
+            return Err(PsError { message: "exec: missing command".into(), line, col });
         }
-
         let (cmd, cmd_args) = args.split_first().unwrap();
-
         if capture {
-            let output = std::process::Command::new(cmd)
-                .args(cmd_args)
-                .output()
-                .map_err(|e| PsError {
-                    message: format!("exec {}: {}", cmd, e),
-                    line,
-                    col,
-                })?;
+            let output = std::process::Command::new(cmd).args(cmd_args).output()
+                .map_err(|e| PsError { message: format!("exec {}: {}", cmd, e), line, col })?;
             let code = output.status.code().unwrap_or(1);
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             Ok((code, Some(stdout)))
         } else {
-            let status = std::process::Command::new(cmd)
-                .args(cmd_args)
-                .status()
-                .map_err(|e| PsError {
-                    message: format!("exec {}: {}", cmd, e),
-                    line,
-                    col,
-                })?;
-            let code = status.code().unwrap_or(1);
-            Ok((code, None))
+            let status = std::process::Command::new(cmd).args(cmd_args).status()
+                .map_err(|e| PsError { message: format!("exec {}: {}", cmd, e), line, col })?;
+            Ok((status.code().unwrap_or(1), None))
         }
     }
 
-    /// Parse command arguments until end of line.
-    ///
-    /// Handles bare words, quoted strings (with interpolation), and `{expr}` references.
-    fn parse_cmd_args(&mut self) -> Result<Vec<String>, PsError> {
-        let mut args = Vec::new();
+    fn exec_if(&mut self) -> Result<ControlFlow, PsError> {
+        let cond = self.parse_expr()?;
+        self.expect(&Token::LBrace)?;
+        let body = self.buffer_block()?;
+
+        if cond.is_truthy() {
+            let cf = self.exec_block(&body)?;
+            // Skip remaining elif/else blocks.
+            self.skip_remaining_elif_else()?;
+            return Ok(cf);
+        }
+
+        // Check for elif/else chains.
         loop {
-            let tok = self.next_cmd_token()?;
-            match tok {
-                Token::Newline | Token::Eof | Token::Comment(_) => break,
-                Token::RParen => {
-                    // Put it back so the caller can consume it.
-                    self.peeked = Some(Token::RParen);
+            self.skip_newlines()?;
+            match self.peek_token()? {
+                Token::Elif => {
+                    self.next_token()?;
+                    let cond = self.parse_expr()?;
+                    self.expect(&Token::LBrace)?;
+                    let body = self.buffer_block()?;
+                    if cond.is_truthy() {
+                        // Skip remaining elif/else blocks.
+                        self.skip_remaining_elif_else()?;
+                        return self.exec_block(&body);
+                    }
+                }
+                Token::Else => {
+                    self.next_token()?;
+                    self.expect(&Token::LBrace)?;
+                    let body = self.buffer_block()?;
+                    return self.exec_block(&body);
+                }
+                _ => break,
+            }
+        }
+        Ok(ControlFlow::Normal)
+    }
+
+    fn skip_remaining_elif_else(&mut self) -> Result<(), PsError> {
+        loop {
+            self.skip_newlines()?;
+            match self.peek_token()? {
+                Token::Elif => {
+                    self.next_token()?;
+                    // Skip condition expression tokens until {.
+                    self.skip_until_lbrace()?;
+                    self.expect(&Token::LBrace)?;
+                    self.buffer_block()?;
+                }
+                Token::Else => {
+                    self.next_token()?;
+                    self.expect(&Token::LBrace)?;
+                    self.buffer_block()?;
                     break;
                 }
-                Token::BareWord(s) => args.push(s),
-                Token::StringLit(s) => args.push(s),
-                Token::StringInterp(segments) => {
-                    let val = self.eval_interp_string(segments)?;
-                    args.push(val.to_str());
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_until_lbrace(&mut self) -> Result<(), PsError> {
+        loop {
+            match self.peek_token()? {
+                Token::LBrace => return Ok(()),
+                Token::Eof => {
+                    let (line, col) = self.pos();
+                    return Err(PsError { message: "expected '{'".into(), line, col });
                 }
-                Token::LBrace => {
-                    // {expr} in command mode -- read until matching }.
-                    let val = self.parse_expr()?;
-                    self.expect(&Token::RBrace)?;
-                    args.push(val.to_str());
+                _ => { self.next_token()?; }
+            }
+        }
+    }
+
+    fn skip_newlines(&mut self) -> Result<(), PsError> {
+        loop {
+            match self.peek_token()? {
+                Token::Newline | Token::Comment(_) => { self.next_token()?; }
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    fn exec_while(&mut self) -> Result<ControlFlow, PsError> {
+        // We need to buffer the condition expression tokens too, so we can replay them.
+        // Simpler approach: buffer everything from here to the closing }.
+        // Actually, for one-pass, we buffer the condition tokens and the body tokens separately.
+
+        // Collect condition tokens until {.
+        let mut cond_tokens = Vec::new();
+        loop {
+            let tok = self.next_token()?;
+            if tok == Token::LBrace {
+                break;
+            }
+            cond_tokens.push(tok);
+        }
+        let body = self.buffer_block()?;
+
+        loop {
+            // Evaluate condition by replaying cond tokens.
+            let cond_val = self.eval_token_expr(&cond_tokens)?;
+            if !cond_val.is_truthy() {
+                break;
+            }
+            match self.exec_block(&body)? {
+                ControlFlow::Normal | ControlFlow::Continue => continue,
+                ControlFlow::Break => break,
+                cf @ ControlFlow::Return(_) => return Ok(cf),
+            }
+        }
+        Ok(ControlFlow::Normal)
+    }
+
+    fn exec_for(&mut self) -> Result<ControlFlow, PsError> {
+        let var_name = match self.next_token()? {
+            Token::Ident(s) => s,
+            other => {
+                let (line, col) = self.pos();
+                return Err(PsError {
+                    message: format!("expected identifier after 'for', got {:?}", other),
+                    line, col,
+                });
+            }
+        };
+        self.expect(&Token::In)?;
+        let iterable = self.parse_expr()?;
+        self.expect(&Token::LBrace)?;
+        let body = self.buffer_block()?;
+
+        let items = match iterable {
+            Value::List(items) => items,
+            other => {
+                let (line, col) = self.pos();
+                return Err(PsError {
+                    message: format!("cannot iterate over {}", other.type_name()),
+                    line, col,
+                });
+            }
+        };
+
+        for item in items {
+            self.scope.push();
+            self.scope.declare(&var_name, item, false);
+            self.token_stack.push((body.clone(), 0));
+            let cf = self.exec_statements();
+            self.token_stack.pop();
+            self.scope.pop();
+            match cf? {
+                ControlFlow::Normal => continue,
+                ControlFlow::Continue => continue,
+                ControlFlow::Break => break,
+                cf @ ControlFlow::Return(_) => return Ok(cf),
+            }
+        }
+        Ok(ControlFlow::Normal)
+    }
+
+    fn exec_match(&mut self) -> Result<ControlFlow, PsError> {
+        let match_val = self.parse_expr()?;
+        self.expect(&Token::LBrace)?;
+
+        // Parse arms until }.
+        let mut matched = false;
+        loop {
+            self.skip_newlines()?;
+            if *self.peek_token()? == Token::RBrace {
+                self.next_token()?;
+                break;
+            }
+
+            // Parse pattern(s): expr (| expr)* => stmt_or_block
+            let patterns = vec![self.parse_match_pattern()?];
+            while *self.peek_token()? == Token::BareWord("_".into()) || false {
+                break; // No | handling needed for single patterns.
+            }
+            // Check for | alternation.
+            // Actually, we just parsed one pattern. Now check for |.
+            // But | is not a token in expression mode. Let me handle it as a bare check.
+            // The `|` is used in pipelines. In match context it's an alternation separator.
+            // For now, skip | support in match -- just handle single patterns and _.
+
+            self.expect(&Token::Arrow)?;
+
+            // Parse the arm body: either a block or a single statement.
+            self.skip_newlines()?;
+            let arm_body = if *self.peek_token()? == Token::LBrace {
+                self.next_token()?;
+                self.buffer_block()?
+            } else {
+                // Single statement until newline.
+                let mut tokens = Vec::new();
+                loop {
+                    let tok = self.next_token()?;
+                    match tok {
+                        Token::Newline | Token::Eof => break,
+                        _ => tokens.push(tok),
+                    }
                 }
+                tokens
+            };
+
+            if !matched {
+                let pattern_matches = match &patterns[0] {
+                    MatchPattern::Wildcard => true,
+                    MatchPattern::Value(v) => *v == match_val,
+                };
+                if pattern_matches {
+                    matched = true;
+                    let cf = self.exec_block(&arm_body)?;
+                    match cf {
+                        ControlFlow::Normal => {}
+                        other => return Ok(other),
+                    }
+                }
+            }
+        }
+        Ok(ControlFlow::Normal)
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<MatchPattern, PsError> {
+        let tok = self.peek_token()?;
+        if let Token::Ident(s) = tok {
+            if s == "_" {
+                self.next_token()?;
+                return Ok(MatchPattern::Wildcard);
+            }
+        }
+        let val = self.parse_expr()?;
+        Ok(MatchPattern::Value(val))
+    }
+
+    fn exec_fn_def(&mut self) -> Result<(), PsError> {
+        let name = match self.next_token()? {
+            Token::Ident(s) => s,
+            other => {
+                let (line, col) = self.pos();
+                return Err(PsError {
+                    message: format!("expected function name, got {:?}", other),
+                    line, col,
+                });
+            }
+        };
+
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        loop {
+            if *self.peek_token()? == Token::RParen {
+                self.next_token()?;
+                break;
+            }
+            if !params.is_empty() {
+                self.expect(&Token::Comma)?;
+            }
+            let param_name = match self.next_token()? {
+                Token::Ident(s) => s,
                 other => {
                     let (line, col) = self.pos();
                     return Err(PsError {
-                        message: format!("unexpected token in command args: {:?}", other),
-                        line,
-                        col,
+                        message: format!("expected parameter name, got {:?}", other),
+                        line, col,
                     });
                 }
+            };
+            self.expect(&Token::Colon)?;
+            let type_name = match self.next_token()? {
+                Token::Ident(s) => s,
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("expected type name, got {:?}", other),
+                        line, col,
+                    });
+                }
+            };
+            params.push((param_name, type_name));
+        }
+
+        // Optional return type.
+        let mut return_type = None;
+        if *self.peek_token()? == Token::Minus {
+            self.next_token()?; // -
+            self.expect(&Token::Gt)?; // >
+            return_type = Some(match self.next_token()? {
+                Token::Ident(s) => s,
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("expected return type, got {:?}", other),
+                        line, col,
+                    });
+                }
+            });
+        }
+
+        self.expect(&Token::LBrace)?;
+        let body = self.buffer_block()?;
+
+        self.functions.insert(name, UserFunction {
+            params,
+            _return_type: return_type,
+            body,
+        });
+        Ok(())
+    }
+
+    fn exec_return(&mut self) -> Result<ControlFlow, PsError> {
+        self.skip_newlines()?;
+        // Check if there's a value to return.
+        match self.peek_token()? {
+            Token::Newline | Token::Eof | Token::RBrace => {
+                Ok(ControlFlow::Return(None))
+            }
+            _ => {
+                let val = self.parse_expr()?;
+                Ok(ControlFlow::Return(Some(val)))
             }
         }
-        Ok(args)
     }
 
-    fn next_cmd_token(&mut self) -> Result<Token, PsError> {
-        if let Some(tok) = self.peeked.take() {
-            return Ok(tok);
-        }
-        self.tokenizer.as_mut().unwrap().next_cmd_token()
-    }
-
-    /// Handle a statement starting with an identifier: function call or assignment.
     fn exec_ident_stmt(&mut self, name: String) -> Result<(), PsError> {
         match self.peek_token()? {
             Token::LParen => {
-                self.call_builtin_function(&name)?;
+                self.call_function(&name)?;
                 Ok(())
             }
             Token::Eq => {
-                // Assignment.
-                self.next_token()?; // consume '='
+                self.next_token()?;
                 let (line, col) = self.pos();
                 let value = self.parse_expr()?;
                 self.scope.set(&name, value, line, col)?;
@@ -301,14 +650,15 @@ impl<'a> Executor<'a> {
                 let (line, col) = self.pos();
                 Err(PsError {
                     message: format!("unexpected identifier '{}'", name),
-                    line,
-                    col,
+                    line, col,
                 })
             }
         }
     }
 
-    fn call_builtin_function(&mut self, name: &str) -> Result<Option<Value>, PsError> {
+    // --- Function calls ---
+
+    fn call_function(&mut self, name: &str) -> Result<Option<Value>, PsError> {
         self.expect(&Token::LParen)?;
         let mut args = Vec::new();
         loop {
@@ -322,58 +672,131 @@ impl<'a> Executor<'a> {
             args.push(self.parse_expr()?);
         }
 
+        // Check builtin functions first.
+        if let Some(result) = self.call_builtin_function(name, &args)? {
+            return Ok(result);
+        }
+
+        // Check user functions.
+        let func = self.functions.get(name).ok_or_else(|| {
+            let (line, col) = self.pos();
+            PsError { message: format!("unknown function '{}'", name), line, col }
+        })?;
+
+        let params = func.params.clone();
+        let body = func.body.clone();
+
+        if args.len() != params.len() {
+            let (line, col) = self.pos();
+            return Err(PsError {
+                message: format!("{}() takes {} arguments, got {}", name, params.len(), args.len()),
+                line, col,
+            });
+        }
+
+        self.scope.push();
+        for ((param_name, _type), val) in params.iter().zip(args) {
+            self.scope.declare(param_name, val, false);
+        }
+        self.token_stack.push((body, 0));
+        let cf = self.exec_statements();
+        self.token_stack.pop();
+        self.scope.pop();
+
+        match cf? {
+            ControlFlow::Return(val) => Ok(val),
+            _ => Ok(None),
+        }
+    }
+
+    fn call_builtin_function(&mut self, name: &str, args: &[Value]) -> Result<Option<Option<Value>>, PsError> {
+        // Returns Ok(Some(...)) if it's a known builtin, Ok(None) if unknown.
         match name {
             "print" => {
                 if args.len() != 1 {
                     let (line, col) = self.pos();
                     return Err(PsError {
                         message: format!("print() takes 1 argument, got {}", args.len()),
-                        line,
-                        col,
+                        line, col,
                     });
                 }
                 write!(self.stdout, "{}", args[0].to_str()).ok();
-                Ok(None)
+                Ok(Some(None))
             }
             "eprintln" => {
                 if args.len() != 1 {
                     let (line, col) = self.pos();
                     return Err(PsError {
                         message: format!("eprintln() takes 1 argument, got {}", args.len()),
-                        line,
-                        col,
+                        line, col,
                     });
                 }
                 writeln!(self.stderr, "{}", args[0].to_str()).ok();
-                Ok(None)
+                Ok(Some(None))
             }
-            _ => {
-                let (line, col) = self.pos();
-                Err(PsError {
-                    message: format!("unknown function '{}'", name),
-                    line,
-                    col,
-                })
-            }
+            _ => Ok(None), // Not a builtin.
         }
     }
 
-    /// Parse an expression with operator precedence (precedence climbing).
-    fn parse_expr(&mut self) -> Result<Value, PsError> {
+    // --- Command args ---
+
+    fn parse_cmd_args(&mut self) -> Result<Vec<String>, PsError> {
+        let mut args = Vec::new();
+        loop {
+            let tok = self.next_cmd_token()?;
+            match tok {
+                Token::Newline | Token::Eof | Token::Comment(_) => break,
+                Token::RParen => {
+                    self.peeked = Some(Token::RParen);
+                    break;
+                }
+                Token::BareWord(s) => args.push(s),
+                Token::StringLit(s) => args.push(s),
+                Token::StringInterp(segments) => {
+                    let val = self.eval_interp_string(segments)?;
+                    args.push(val.to_str());
+                }
+                Token::LBrace => {
+                    let val = self.parse_expr()?;
+                    self.expect(&Token::RBrace)?;
+                    args.push(val.to_str());
+                }
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("unexpected token in command args: {:?}", other),
+                        line, col,
+                    });
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    // --- Expressions ---
+
+    pub fn parse_expr(&mut self) -> Result<Value, PsError> {
         self.parse_expr_bp(0)
     }
 
-    /// Precedence climbing: parse expression with minimum binding power.
     fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Value, PsError> {
-        let mut lhs = self.parse_primary()?;
+        let mut lhs = self.parse_unary()?;
 
         loop {
-            let op = match self.peek_token()? {
-                Token::Plus => "+",
-                Token::Minus => "-",
-                Token::Star => "*",
-                Token::Slash => "/",
-                Token::Percent => "%",
+            let (op, is_cmp, is_logic) = match self.peek_token()? {
+                Token::Plus => ("+", false, false),
+                Token::Minus => ("-", false, false),
+                Token::Star => ("*", false, false),
+                Token::Slash => ("/", false, false),
+                Token::Percent => ("%", false, false),
+                Token::EqEq => ("==", true, false),
+                Token::NotEq => ("!=", true, false),
+                Token::Lt => ("<", true, false),
+                Token::Gt => (">", true, false),
+                Token::LtEq => ("<=", true, false),
+                Token::GtEq => (">=", true, false),
+                Token::And => ("and", false, true),
+                Token::Or => ("or", false, true),
                 _ => break,
             };
 
@@ -381,72 +804,38 @@ impl<'a> Executor<'a> {
             if l_bp < min_bp {
                 break;
             }
-            self.next_token()?; // consume operator
+            self.next_token()?;
 
-            let rhs = self.parse_expr_bp(r_bp)?;
-            let (line, col) = self.pos();
-            lhs = lhs.binary_op(op, rhs).map_err(|msg| PsError { message: msg, line, col })?;
+            if is_logic {
+                let rhs = self.parse_expr_bp(r_bp)?;
+                lhs = match op {
+                    "and" => Value::Bool(lhs.is_truthy() && rhs.is_truthy()),
+                    "or" => Value::Bool(lhs.is_truthy() || rhs.is_truthy()),
+                    _ => unreachable!(),
+                };
+            } else if is_cmp {
+                let rhs = self.parse_expr_bp(r_bp)?;
+                let (line, col) = self.pos();
+                lhs = lhs.compare(op, &rhs).map_err(|msg| PsError { message: msg, line, col })?;
+            } else {
+                let rhs = self.parse_expr_bp(r_bp)?;
+                let (line, col) = self.pos();
+                lhs = lhs.binary_op(op, rhs).map_err(|msg| PsError { message: msg, line, col })?;
+            }
         }
 
         Ok(lhs)
     }
 
-    /// Parse `$(run cmd ...)` or `$(exec cmd ...)` capture expression.
-    ///
-    /// Returns the captured stdout as a trimmed string.
-    fn parse_capture(&mut self) -> Result<Value, PsError> {
-        let tok = self.next_token()?;
-        let (code, captured) = match tok {
-            Token::Run => self.exec_run_inner(true)?,
-            Token::Exec => self.exec_exec_inner(true)?,
-            other => {
-                let (line, col) = self.pos();
-                return Err(PsError {
-                    message: format!("expected 'run' or 'exec' after '$(', got {:?}", other),
-                    line,
-                    col,
-                });
-            }
-        };
-        self.expect(&Token::RParen)?;
-
-        if code != 0 {
-            let (line, col) = self.pos();
-            return Err(PsError {
-                message: format!("command in $() failed with code {}", code),
-                line,
-                col,
-            });
+    fn parse_unary(&mut self) -> Result<Value, PsError> {
+        if *self.peek_token()? == Token::Not {
+            self.next_token()?;
+            let val = self.parse_unary()?;
+            return Ok(Value::Bool(!val.is_truthy()));
         }
-
-        let output = captured.unwrap_or_default();
-        // Trim trailing whitespace (like bash's $()).
-        Ok(Value::Str(output.trim_end().to_string()))
+        self.parse_primary()
     }
 
-    /// Evaluate an interpolated string by parsing and evaluating each expression segment.
-    fn eval_interp_string(&mut self, segments: Vec<StringSegment>) -> Result<Value, PsError> {
-        let mut result = String::new();
-        for seg in segments {
-            match seg {
-                StringSegment::Literal(s) => result.push_str(&s),
-                StringSegment::Expr(expr_src) => {
-                    // Parse and evaluate the expression source.
-                    let sub_tokenizer = Tokenizer::new(&expr_src);
-                    let saved_tokenizer = self.tokenizer.take();
-                    let saved_peeked = self.peeked.take();
-                    self.tokenizer = Some(sub_tokenizer);
-                    let val = self.parse_expr()?;
-                    self.tokenizer = saved_tokenizer;
-                    self.peeked = saved_peeked;
-                    result.push_str(&val.to_str());
-                }
-            }
-        }
-        Ok(Value::Str(result))
-    }
-
-    /// Parse a primary expression (literal, variable, function call, parenthesized).
     fn parse_primary(&mut self) -> Result<Value, PsError> {
         let tok = self.next_token()?;
         match tok {
@@ -461,33 +850,48 @@ impl<'a> Executor<'a> {
                 self.expect(&Token::RParen)?;
                 Ok(val)
             }
-            Token::DollarParen => {
-                return self.parse_capture();
+            Token::LBracket => {
+                // List literal [a, b, c].
+                let mut items = Vec::new();
+                loop {
+                    if *self.peek_token()? == Token::RBracket {
+                        self.next_token()?;
+                        break;
+                    }
+                    if !items.is_empty() {
+                        self.expect(&Token::Comma)?;
+                    }
+                    // Skip newlines inside list literals.
+                    self.skip_newlines()?;
+                    if *self.peek_token()? == Token::RBracket {
+                        self.next_token()?;
+                        break;
+                    }
+                    items.push(self.parse_expr()?);
+                }
+                Ok(Value::List(items))
             }
+            Token::DollarParen => self.parse_capture(),
             Token::Ident(name) => {
-                // Check for function call.
                 if *self.peek_token()? == Token::LParen {
-                    match self.call_builtin_function(&name)? {
+                    match self.call_function(&name)? {
                         Some(val) => Ok(val),
                         None => {
                             let (line, col) = self.pos();
                             Err(PsError {
                                 message: format!("function '{}' does not return a value", name),
-                                line,
-                                col,
+                                line, col,
                             })
                         }
                     }
                 } else {
-                    // Variable reference.
                     match self.scope.get(&name) {
                         Some(val) => Ok(val.clone()),
                         None => {
                             let (line, col) = self.pos();
                             Err(PsError {
                                 message: format!("undefined variable '{}'", name),
-                                line,
-                                col,
+                                line, col,
                             })
                         }
                     }
@@ -497,19 +901,83 @@ impl<'a> Executor<'a> {
                 let (line, col) = self.pos();
                 Err(PsError {
                     message: format!("expected expression, got {:?}", tok),
-                    line,
-                    col,
+                    line, col,
                 })
             }
         }
     }
+
+    fn parse_capture(&mut self) -> Result<Value, PsError> {
+        let tok = self.next_token()?;
+        let (code, captured) = match tok {
+            Token::Run => self.exec_run_inner(true)?,
+            Token::Exec => self.exec_exec_inner(true)?,
+            other => {
+                let (line, col) = self.pos();
+                return Err(PsError {
+                    message: format!("expected 'run' or 'exec' after '$(', got {:?}", other),
+                    line, col,
+                });
+            }
+        };
+        self.expect(&Token::RParen)?;
+        if code != 0 {
+            let (line, col) = self.pos();
+            return Err(PsError {
+                message: format!("command in $() failed with code {}", code),
+                line, col,
+            });
+        }
+        let output = captured.unwrap_or_default();
+        Ok(Value::Str(output.trim_end().to_string()))
+    }
+
+    fn eval_interp_string(&mut self, segments: Vec<StringSegment>) -> Result<Value, PsError> {
+        let mut result = String::new();
+        for seg in segments {
+            match seg {
+                StringSegment::Literal(s) => result.push_str(&s),
+                StringSegment::Expr(expr_src) => {
+                    // Tokenize the expression and evaluate via token stack.
+                    let mut tok = Tokenizer::new(&expr_src);
+                    let mut tokens = Vec::new();
+                    loop {
+                        let t = tok.next_token()?;
+                        if t == Token::Eof {
+                            break;
+                        }
+                        tokens.push(t);
+                    }
+                    let val = self.eval_token_expr(&tokens)?;
+                    result.push_str(&val.to_str());
+                }
+            }
+        }
+        Ok(Value::Str(result))
+    }
+
+    /// Evaluate an expression from buffered tokens.
+    fn eval_token_expr(&mut self, tokens: &[Token]) -> Result<Value, PsError> {
+        self.token_stack.push((tokens.to_vec(), 0));
+        let val = self.parse_expr();
+        self.token_stack.pop();
+        self.peeked = None; // Clear any leftover peeked token from the buffer.
+        val
+    }
 }
 
-/// Return (left binding power, right binding power) for infix operators.
+enum MatchPattern {
+    Value(Value),
+    Wildcard,
+}
+
 fn infix_binding_power(op: &str) -> (u8, u8) {
     match op {
-        "+" | "-" => (1, 2),
-        "*" | "/" | "%" => (3, 4),
+        "or" => (1, 2),
+        "and" => (3, 4),
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => (5, 6),
+        "+" | "-" => (7, 8),
+        "*" | "/" | "%" => (9, 10),
         _ => (0, 0),
     }
 }

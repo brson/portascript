@@ -21,6 +21,16 @@ impl Scope {
         }
     }
 
+    /// Push a new scope frame (entering a block).
+    pub fn push(&mut self) {
+        self.frames.push(HashMap::new());
+    }
+
+    /// Pop the top scope frame (leaving a block).
+    pub fn pop(&mut self) {
+        self.frames.pop();
+    }
+
     /// Declare a new variable in the current (top) frame.
     pub fn declare(&mut self, name: &str, value: Value, mutable: bool) {
         let frame = self.frames.last_mut().unwrap();

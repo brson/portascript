@@ -33,6 +33,20 @@ pub enum Token {
     Exec,
     Let,
     Mut,
+    If,
+    Elif,
+    Else,
+    While,
+    For,
+    In,
+    Break,
+    Continue,
+    Fn,
+    Return,
+    Match,
+    And,
+    Or,
+    Not,
 
     // Operators.
     Plus,
@@ -40,6 +54,14 @@ pub enum Token {
     Star,
     Slash,
     Percent,
+    EqEq,
+    NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
+    Arrow,    // =>
+    Colon,
 
     /// A bare word in command mode (flags, paths, etc.).
     BareWord(String),
@@ -49,6 +71,8 @@ pub enum Token {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     /// `$(` -- start of command capture expression.
     DollarParen,
     Comma,
@@ -255,6 +279,20 @@ impl Tokenizer {
             "exec" => Token::Exec,
             "let" => Token::Let,
             "mut" => Token::Mut,
+            "if" => Token::If,
+            "elif" => Token::Elif,
+            "else" => Token::Else,
+            "while" => Token::While,
+            "for" => Token::For,
+            "in" => Token::In,
+            "break" => Token::Break,
+            "continue" => Token::Continue,
+            "fn" => Token::Fn,
+            "return" => Token::Return,
+            "match" => Token::Match,
+            "and" => Token::And,
+            "or" => Token::Or,
+            "not" => Token::Not,
             _ => Token::Ident(s),
         }
     }
@@ -396,7 +434,58 @@ impl Tokenizer {
             }
             Some('=') => {
                 self.advance();
-                Ok(Token::Eq)
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::EqEq)
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    Ok(Token::Arrow)
+                } else {
+                    Ok(Token::Eq)
+                }
+            }
+            Some('!') => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::NotEq)
+                } else {
+                    Err(PsError {
+                        message: "unexpected '!' (did you mean '!='?)".into(),
+                        line: self.line,
+                        col: self.col,
+                    })
+                }
+            }
+            Some('<') => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::LtEq)
+                } else {
+                    Ok(Token::Lt)
+                }
+            }
+            Some('>') => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::GtEq)
+                } else {
+                    Ok(Token::Gt)
+                }
+            }
+            Some(':') => {
+                self.advance();
+                Ok(Token::Colon)
+            }
+            Some('[') => {
+                self.advance();
+                Ok(Token::LBracket)
+            }
+            Some(']') => {
+                self.advance();
+                Ok(Token::RBracket)
             }
             Some(ch) if ch.is_ascii_digit() => Ok(self.read_number()),
             Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => Ok(self.read_ident()),

@@ -5,6 +5,7 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
+    List(Vec<Value>),
 }
 
 impl Value {
@@ -15,11 +16,13 @@ impl Value {
             Value::Int(n) => n.to_string(),
             Value::Float(f) => f.to_string(),
             Value::Bool(b) => b.to_string(),
+            Value::List(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.to_str()).collect();
+                format!("[{}]", parts.join(", "))
+            }
         }
     }
-}
 
-impl Value {
     /// Apply a binary arithmetic/string operator.
     pub fn binary_op(self, op: &str, other: Value) -> Result<Value, String> {
         match (self, other) {
@@ -28,18 +31,12 @@ impl Value {
                 "-" => Ok(Value::Int(a - b)),
                 "*" => Ok(Value::Int(a * b)),
                 "/" => {
-                    if b == 0 {
-                        Err("division by zero".into())
-                    } else {
-                        Ok(Value::Int(a / b))
-                    }
+                    if b == 0 { Err("division by zero".into()) }
+                    else { Ok(Value::Int(a / b)) }
                 }
                 "%" => {
-                    if b == 0 {
-                        Err("division by zero".into())
-                    } else {
-                        Ok(Value::Int(a % b))
-                    }
+                    if b == 0 { Err("division by zero".into()) }
+                    else { Ok(Value::Int(a % b)) }
                 }
                 _ => Err(format!("unsupported operator '{}' for int", op)),
             },
@@ -58,6 +55,34 @@ impl Value {
         }
     }
 
+    /// Apply a comparison operator. Returns a Bool.
+    pub fn compare(&self, op: &str, other: &Value) -> Result<Value, String> {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(int_cmp(*a, *b, op))),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(float_cmp(*a, *b, op))),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Bool(float_cmp(*a as f64, *b, op))),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(float_cmp(*a, *b as f64, op))),
+            (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(str_cmp(a, b, op))),
+            (Value::Bool(a), Value::Bool(b)) => match op {
+                "==" => Ok(Value::Bool(a == b)),
+                "!=" => Ok(Value::Bool(a != b)),
+                _ => Err(format!("unsupported comparison '{}' for bool", op)),
+            },
+            (a, b) => Err(format!("cannot compare {} and {}", a.type_name(), b.type_name())),
+        }
+    }
+
+    /// Check if the value is truthy.
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Value::Bool(b) => *b,
+            Value::Str(s) => !s.is_empty(),
+            Value::Int(n) => *n != 0,
+            Value::Float(f) => *f != 0.0,
+            Value::List(items) => !items.is_empty(),
+        }
+    }
+
     /// Return the type name.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -65,7 +90,35 @@ impl Value {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::Bool(_) => "bool",
+            Value::List(_) => "list",
         }
+    }
+}
+
+fn int_cmp(a: i64, b: i64, op: &str) -> bool {
+    match op {
+        "==" => a == b, "!=" => a != b,
+        "<" => a < b, ">" => a > b,
+        "<=" => a <= b, ">=" => a >= b,
+        _ => false,
+    }
+}
+
+fn float_cmp(a: f64, b: f64, op: &str) -> bool {
+    match op {
+        "==" => a == b, "!=" => a != b,
+        "<" => a < b, ">" => a > b,
+        "<=" => a <= b, ">=" => a >= b,
+        _ => false,
+    }
+}
+
+fn str_cmp(a: &str, b: &str, op: &str) -> bool {
+    match op {
+        "==" => a == b, "!=" => a != b,
+        "<" => a < b, ">" => a > b,
+        "<=" => a <= b, ">=" => a >= b,
+        _ => false,
     }
 }
 

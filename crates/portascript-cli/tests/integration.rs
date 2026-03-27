@@ -234,3 +234,84 @@ fn test_021_capture_run() {
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "from builtin");
 }
+
+// --- Step 22: if/else ---
+
+#[test]
+fn test_022_if_else() {
+    let r = run_script("022_if_else.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "big");
+}
+
+// --- Step 23: elif ---
+
+#[test]
+fn test_023_elif() {
+    let r = run_script("023_elif.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "zero");
+}
+
+// --- Step 24: logical operators ---
+
+#[test]
+fn test_024_logical() {
+    let r = run_script("024_logical.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "in range ok");
+}
+
+// --- Step 25: while loop ---
+
+#[test]
+fn test_025_while() {
+    let r = run_script("025_while.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "012");
+}
+
+// --- Step 26: for/in list ---
+
+#[test]
+fn test_026_for_list() {
+    let r = run_script("026_for_list.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "abc");
+}
+
+// --- Step 27: break/continue ---
+
+#[test]
+fn test_027_break_continue() {
+    let r = run_script("027_break_continue.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "124");
+}
+
+// --- Step 28: match ---
+
+#[test]
+fn test_028_match() {
+    let r = run_script("028_match.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "rust");
+}
+
+// --- Step 29: function ---
+
+#[test]
+fn test_029_function() {
+    let r = run_script("029_function.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello world");
+}
+
+// --- Step 30: function return ---
+
+#[test]
+fn test_030_fn_return() {
+    let r = run_script("030_fn_return.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "7");
+}
