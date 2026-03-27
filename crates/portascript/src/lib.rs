@@ -1,6 +1,7 @@
 mod token;
 mod value;
 mod scope;
+mod builtins;
 mod exec;
 
 use rmx::prelude::*;

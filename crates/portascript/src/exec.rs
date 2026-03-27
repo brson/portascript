@@ -1,4 +1,4 @@
-use crate::token::{Token, Tokenizer};
+use crate::token::{Token, StringSegment, Tokenizer};
 use crate::value::Value;
 use crate::scope::Scope;
 use crate::PsError;
@@ -69,8 +69,14 @@ impl<'a> Executor<'a> {
             match tok {
                 Token::Eof => return Ok(0),
                 Token::Newline | Token::Comment(_) => continue,
-                Token::Ident(ref name) if name == "let" => {
+                Token::Let => {
                     self.exec_let()?;
+                }
+                Token::Run => {
+                    self.exec_run()?;
+                }
+                Token::Exec => {
+                    self.exec_exec()?;
                 }
                 Token::Ident(name) => {
                     self.exec_ident_stmt(name)?;
@@ -92,7 +98,7 @@ impl<'a> Executor<'a> {
         let mut mutable = false;
         let tok = self.next_token()?;
         let name = match tok {
-            Token::Ident(ref s) if s == "mut" => {
+            Token::Mut => {
                 mutable = true;
                 match self.next_token()? {
                     Token::Ident(n) => n,
@@ -120,6 +126,160 @@ impl<'a> Executor<'a> {
         let value = self.parse_expr()?;
         self.scope.declare(&name, value, mutable);
         Ok(())
+    }
+
+    /// Execute `run <builtin> <args...>` as a statement.
+    fn exec_run(&mut self) -> Result<(), PsError> {
+        let (code, _) = self.exec_run_inner(false)?;
+        if code != 0 {
+            let (line, col) = self.pos();
+            return Err(PsError {
+                message: format!("run: exited with code {}", code),
+                line,
+                col,
+            });
+        }
+        Ok(())
+    }
+
+    /// Inner run implementation. If `capture` is true, captures stdout and returns it.
+    fn exec_run_inner(&mut self, capture: bool) -> Result<(i32, Option<String>), PsError> {
+        let name_tok = self.next_cmd_token()?;
+        let name = match name_tok {
+            Token::BareWord(s) | Token::Ident(s) => s,
+            other => {
+                let (line, col) = self.pos();
+                return Err(PsError {
+                    message: format!("expected builtin name after 'run', got {:?}", other),
+                    line,
+                    col,
+                });
+            }
+        };
+
+        let args = self.parse_cmd_args()?;
+        let (line, col) = self.pos();
+
+        if capture {
+            match crate::builtins::run_builtin_capture(&name, args) {
+                Some((code, stdout)) => Ok((code, Some(stdout))),
+                None => Err(PsError {
+                    message: format!("unknown builtin '{}'", name),
+                    line,
+                    col,
+                }),
+            }
+        } else {
+            match crate::builtins::run_builtin(&name, args) {
+                Some(code) => Ok((code, None)),
+                None => Err(PsError {
+                    message: format!("unknown builtin '{}'", name),
+                    line,
+                    col,
+                }),
+            }
+        }
+    }
+
+    /// Execute `exec <command> <args...>` as a statement.
+    fn exec_exec(&mut self) -> Result<(), PsError> {
+        let (code, _) = self.exec_exec_inner(false)?;
+        if code != 0 {
+            let (line, col) = self.pos();
+            return Err(PsError {
+                message: format!("exec: exited with code {}", code),
+                line,
+                col,
+            });
+        }
+        Ok(())
+    }
+
+    /// Inner exec implementation. If `capture` is true, captures stdout.
+    fn exec_exec_inner(&mut self, capture: bool) -> Result<(i32, Option<String>), PsError> {
+        let args = self.parse_cmd_args()?;
+        let (line, col) = self.pos();
+
+        if args.is_empty() {
+            return Err(PsError {
+                message: "exec: missing command".into(),
+                line,
+                col,
+            });
+        }
+
+        let (cmd, cmd_args) = args.split_first().unwrap();
+
+        if capture {
+            let output = std::process::Command::new(cmd)
+                .args(cmd_args)
+                .output()
+                .map_err(|e| PsError {
+                    message: format!("exec {}: {}", cmd, e),
+                    line,
+                    col,
+                })?;
+            let code = output.status.code().unwrap_or(1);
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            Ok((code, Some(stdout)))
+        } else {
+            let status = std::process::Command::new(cmd)
+                .args(cmd_args)
+                .status()
+                .map_err(|e| PsError {
+                    message: format!("exec {}: {}", cmd, e),
+                    line,
+                    col,
+                })?;
+            let code = status.code().unwrap_or(1);
+            Ok((code, None))
+        }
+    }
+
+    /// Parse command arguments until end of line.
+    ///
+    /// Handles bare words, quoted strings (with interpolation), and `{expr}` references.
+    fn parse_cmd_args(&mut self) -> Result<Vec<String>, PsError> {
+        let mut args = Vec::new();
+        loop {
+            let tok = self.next_cmd_token()?;
+            match tok {
+                Token::Newline | Token::Eof | Token::Comment(_) => break,
+                Token::RParen => {
+                    // Put it back so the caller can consume it.
+                    self.peeked = Some(Token::RParen);
+                    break;
+                }
+                Token::BareWord(s) => args.push(s),
+                Token::StringLit(s) => args.push(s),
+                Token::StringInterp(segments) => {
+                    let val = self.eval_interp_string(segments)?;
+                    args.push(val.to_str());
+                }
+                Token::LBrace => {
+                    // {expr} in command mode -- read until matching }.
+                    let val = self.parse_expr()?;
+                    self.expect(&Token::RBrace)?;
+                    args.push(val.to_str());
+                }
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("unexpected token in command args: {:?}", other),
+                        line,
+                        col,
+                    });
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    fn next_cmd_token(&mut self) -> Result<Token, PsError> {
+        if let Some(tok) = self.peeked.take() {
+            return Ok(tok);
+        }
+        self.tokenizer.as_mut().unwrap().next_cmd_token()
     }
 
     /// Handle a statement starting with an identifier: function call or assignment.
@@ -175,6 +335,18 @@ impl<'a> Executor<'a> {
                 write!(self.stdout, "{}", args[0].to_str()).ok();
                 Ok(None)
             }
+            "eprintln" => {
+                if args.len() != 1 {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("eprintln() takes 1 argument, got {}", args.len()),
+                        line,
+                        col,
+                    });
+                }
+                writeln!(self.stderr, "{}", args[0].to_str()).ok();
+                Ok(None)
+            }
             _ => {
                 let (line, col) = self.pos();
                 Err(PsError {
@@ -219,11 +391,67 @@ impl<'a> Executor<'a> {
         Ok(lhs)
     }
 
+    /// Parse `$(run cmd ...)` or `$(exec cmd ...)` capture expression.
+    ///
+    /// Returns the captured stdout as a trimmed string.
+    fn parse_capture(&mut self) -> Result<Value, PsError> {
+        let tok = self.next_token()?;
+        let (code, captured) = match tok {
+            Token::Run => self.exec_run_inner(true)?,
+            Token::Exec => self.exec_exec_inner(true)?,
+            other => {
+                let (line, col) = self.pos();
+                return Err(PsError {
+                    message: format!("expected 'run' or 'exec' after '$(', got {:?}", other),
+                    line,
+                    col,
+                });
+            }
+        };
+        self.expect(&Token::RParen)?;
+
+        if code != 0 {
+            let (line, col) = self.pos();
+            return Err(PsError {
+                message: format!("command in $() failed with code {}", code),
+                line,
+                col,
+            });
+        }
+
+        let output = captured.unwrap_or_default();
+        // Trim trailing whitespace (like bash's $()).
+        Ok(Value::Str(output.trim_end().to_string()))
+    }
+
+    /// Evaluate an interpolated string by parsing and evaluating each expression segment.
+    fn eval_interp_string(&mut self, segments: Vec<StringSegment>) -> Result<Value, PsError> {
+        let mut result = String::new();
+        for seg in segments {
+            match seg {
+                StringSegment::Literal(s) => result.push_str(&s),
+                StringSegment::Expr(expr_src) => {
+                    // Parse and evaluate the expression source.
+                    let sub_tokenizer = Tokenizer::new(&expr_src);
+                    let saved_tokenizer = self.tokenizer.take();
+                    let saved_peeked = self.peeked.take();
+                    self.tokenizer = Some(sub_tokenizer);
+                    let val = self.parse_expr()?;
+                    self.tokenizer = saved_tokenizer;
+                    self.peeked = saved_peeked;
+                    result.push_str(&val.to_str());
+                }
+            }
+        }
+        Ok(Value::Str(result))
+    }
+
     /// Parse a primary expression (literal, variable, function call, parenthesized).
     fn parse_primary(&mut self) -> Result<Value, PsError> {
         let tok = self.next_token()?;
         match tok {
             Token::StringLit(s) => Ok(Value::Str(s)),
+            Token::StringInterp(segments) => self.eval_interp_string(segments),
             Token::IntLit(n) => Ok(Value::Int(n)),
             Token::FloatLit(f) => Ok(Value::Float(f)),
             Token::True => Ok(Value::Bool(true)),
@@ -232,6 +460,9 @@ impl<'a> Executor<'a> {
                 let val = self.parse_expr()?;
                 self.expect(&Token::RParen)?;
                 Ok(val)
+            }
+            Token::DollarParen => {
+                return self.parse_capture();
             }
             Token::Ident(name) => {
                 // Check for function call.

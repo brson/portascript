@@ -1,5 +1,14 @@
 use crate::PsError;
 
+/// A segment of an interpolated string.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringSegment {
+    /// Literal text.
+    Literal(String),
+    /// An expression to evaluate (source text between `{` and `}`).
+    Expr(String),
+}
+
 /// Token types for the portascript lexer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -8,7 +17,11 @@ pub enum Token {
     Comment(String),
 
     // Literals.
+    /// Raw string (single-quoted, no interpolation).
     StringLit(String),
+    /// Interpolated string (double-quoted). Segments alternate between
+    /// literal text and expression source fragments.
+    StringInterp(Vec<StringSegment>),
     IntLit(i64),
     FloatLit(f64),
 
@@ -16,6 +29,10 @@ pub enum Token {
     Ident(String),
     True,
     False,
+    Run,
+    Exec,
+    Let,
+    Mut,
 
     // Operators.
     Plus,
@@ -24,9 +41,16 @@ pub enum Token {
     Slash,
     Percent,
 
+    /// A bare word in command mode (flags, paths, etc.).
+    BareWord(String),
+
     // Symbols.
     LParen,
     RParen,
+    LBrace,
+    RBrace,
+    /// `$(` -- start of command capture expression.
+    DollarParen,
     Comma,
     Eq,
 }
@@ -75,7 +99,8 @@ impl Tokenizer {
         }
     }
 
-    fn read_string(&mut self, quote: char) -> Result<String, PsError> {
+    /// Read a raw string (single-quoted, no interpolation).
+    fn read_raw_string(&mut self) -> Result<String, PsError> {
         let (line, col) = (self.line, self.col);
         self.advance(); // consume opening quote
         let mut s = String::new();
@@ -88,9 +113,98 @@ impl Tokenizer {
                         col,
                     });
                 }
-                Some(ch) if ch == quote => return Ok(s),
+                Some('\'') => return Ok(s),
                 Some(ch) => s.push(ch),
             }
+        }
+    }
+
+    /// Read a double-quoted string with `{expr}` interpolation.
+    fn read_interp_string(&mut self) -> Result<Token, PsError> {
+        let (line, col) = (self.line, self.col);
+        self.advance(); // consume opening "
+        let mut segments = Vec::new();
+        let mut current = String::new();
+        let mut has_interp = false;
+        loop {
+            match self.advance() {
+                None => {
+                    return Err(PsError {
+                        message: "unterminated string".into(),
+                        line,
+                        col,
+                    });
+                }
+                Some('"') => {
+                    if !current.is_empty() {
+                        segments.push(StringSegment::Literal(current));
+                    }
+                    break;
+                }
+                Some('{') => {
+                    if !current.is_empty() {
+                        segments.push(StringSegment::Literal(current));
+                        current = String::new();
+                    }
+                    // Read until matching '}'.
+                    let mut expr = String::new();
+                    let mut depth = 1;
+                    loop {
+                        match self.advance() {
+                            None => {
+                                return Err(PsError {
+                                    message: "unterminated interpolation in string".into(),
+                                    line,
+                                    col,
+                                });
+                            }
+                            Some('{') => {
+                                depth += 1;
+                                expr.push('{');
+                            }
+                            Some('}') => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                expr.push('}');
+                            }
+                            Some(ch) => expr.push(ch),
+                        }
+                    }
+                    segments.push(StringSegment::Expr(expr));
+                    has_interp = true;
+                }
+                Some('\\') => {
+                    // Escape sequence.
+                    match self.advance() {
+                        Some('n') => current.push('\n'),
+                        Some('t') => current.push('\t'),
+                        Some('\\') => current.push('\\'),
+                        Some('{') => current.push('{'),
+                        Some('"') => current.push('"'),
+                        Some(ch) => {
+                            current.push('\\');
+                            current.push(ch);
+                        }
+                        None => current.push('\\'),
+                    }
+                }
+                Some(ch) => current.push(ch),
+            }
+        }
+        // Optimization: if no interpolation, produce a plain StringLit.
+        if !has_interp {
+            let s = segments
+                .into_iter()
+                .map(|seg| match seg {
+                    StringSegment::Literal(s) => s,
+                    StringSegment::Expr(_) => unreachable!(),
+                })
+                .collect::<String>();
+            Ok(Token::StringLit(s))
+        } else {
+            Ok(Token::StringInterp(segments))
         }
     }
 
@@ -137,7 +251,67 @@ impl Tokenizer {
         match s.as_str() {
             "true" => Token::True,
             "false" => Token::False,
+            "run" => Token::Run,
+            "exec" => Token::Exec,
+            "let" => Token::Let,
+            "mut" => Token::Mut,
             _ => Token::Ident(s),
+        }
+    }
+
+    /// Read the next token in command mode.
+    ///
+    /// In command mode, bare words (flags, paths) are valid tokens.
+    /// Stops at newline, `|`, or EOF.
+    pub fn next_cmd_token(&mut self) -> Result<Token, PsError> {
+        self.skip_whitespace_no_newline();
+
+        match self.peek() {
+            None => Ok(Token::Eof),
+            Some('\n') => {
+                self.advance();
+                Ok(Token::Newline)
+            }
+            Some('#') => {
+                // Comment consumes to end of line.
+                let mut text = String::new();
+                while let Some(ch) = self.peek() {
+                    if ch == '\n' {
+                        break;
+                    }
+                    text.push(ch);
+                    self.advance();
+                }
+                Ok(Token::Comment(text))
+            }
+            Some('"') => self.read_interp_string(),
+            Some('\'') => {
+                let s = self.read_raw_string()?;
+                Ok(Token::StringLit(s))
+            }
+            Some('{') => {
+                self.advance();
+                Ok(Token::LBrace)
+            }
+            Some(')') => {
+                self.advance();
+                Ok(Token::RParen)
+            }
+            _ => {
+                // Read a bare word: anything that isn't whitespace, newline, or special chars.
+                let mut word = String::new();
+                while let Some(ch) = self.peek() {
+                    if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'
+                        || ch == '{' || ch == '"' || ch == '\'' || ch == '#'
+                        || ch == ')'
+                    {
+                        break;
+                    }
+                    word.push(ch);
+                    self.advance();
+                }
+                Ok(Token::BareWord(word))
+            }
         }
     }
 
@@ -162,12 +336,9 @@ impl Tokenizer {
                 }
                 Ok(Token::Comment(text))
             }
-            Some('"') => {
-                let s = self.read_string('"')?;
-                Ok(Token::StringLit(s))
-            }
+            Some('"') => self.read_interp_string(),
             Some('\'') => {
-                let s = self.read_string('\'')?;
+                let s = self.read_raw_string()?;
                 Ok(Token::StringLit(s))
             }
             Some('(') => {
@@ -181,6 +352,27 @@ impl Tokenizer {
             Some(',') => {
                 self.advance();
                 Ok(Token::Comma)
+            }
+            Some('$') => {
+                self.advance();
+                if self.peek() == Some('(') {
+                    self.advance();
+                    Ok(Token::DollarParen)
+                } else {
+                    Err(PsError {
+                        message: "unexpected '$' (did you mean '$('?)".into(),
+                        line: self.line,
+                        col: self.col,
+                    })
+                }
+            }
+            Some('{') => {
+                self.advance();
+                Ok(Token::LBrace)
+            }
+            Some('}') => {
+                self.advance();
+                Ok(Token::RBrace)
             }
             Some('+') => {
                 self.advance();

@@ -143,3 +143,94 @@ fn test_011_string_concat() {
     assert_eq!(r.code, 0);
     assert_eq!(r.stdout, "hello world");
 }
+
+// --- Step 12: string interpolation ---
+
+#[test]
+fn test_012_interpolation() {
+    let r = run_script("012_interpolation.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "hello world, number 42");
+}
+
+// --- Step 13: single-quoted raw strings ---
+
+#[test]
+fn test_013_raw_string() {
+    let r = run_script("013_raw_string.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "hello {name}");
+}
+
+// --- Step 14: eprintln ---
+
+#[test]
+fn test_014_eprintln() {
+    let r = run_script("014_eprintln.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "");
+    assert_eq!(r.stderr, "error message\n");
+}
+
+// --- Step 15: run echo ---
+
+#[test]
+fn test_015_run_echo() {
+    let r = run_script("015_run_echo.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello world\n");
+}
+
+// --- Step 16: run echo with interpolation ---
+
+#[test]
+fn test_016_run_echo_interp() {
+    let r = run_script("016_run_echo_interp.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello world\n");
+}
+
+// --- Step 17: run echo with expression arg ---
+
+#[test]
+fn test_017_run_echo_expr() {
+    let r = run_script("017_run_echo_expr.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "42\n");
+}
+
+// --- Step 18: exec ---
+
+#[test]
+fn test_018_exec() {
+    let r = run_script("018_exec.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello from exec\n");
+}
+
+// --- Step 19: exec nonzero aborts ---
+
+#[test]
+fn test_019_exec_fail() {
+    let r = run_script("019_exec_fail.psc");
+    assert_ne!(r.code, 0);
+    assert!(!r.stdout.contains("should not reach here"), "stdout: {}", r.stdout);
+}
+
+// --- Step 20: $() capture with exec ---
+
+#[test]
+fn test_020_capture() {
+    let r = run_script("020_capture.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "captured");
+}
+
+// --- Step 21: $() capture with run ---
+
+#[test]
+fn test_021_capture_run() {
+    let r = run_script("021_capture_run.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "from builtin");
+}
