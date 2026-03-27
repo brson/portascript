@@ -1,0 +1,145 @@
+use std::path::PathBuf;
+use std::process::Command;
+
+struct ScriptResult {
+    stdout: String,
+    stderr: String,
+    code: i32,
+}
+
+fn scripts_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/scripts")
+}
+
+fn run_script(name: &str) -> ScriptResult {
+    let bin = env!("CARGO_BIN_EXE_portascript");
+    let script = scripts_dir().join(name);
+    let output = Command::new(bin)
+        .arg(&script)
+        .output()
+        .expect("failed to run portascript");
+    ScriptResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        code: output.status.code().unwrap_or(-1),
+    }
+}
+
+#[allow(dead_code)]
+fn run_script_with_args(name: &str, args: &[&str]) -> ScriptResult {
+    let bin = env!("CARGO_BIN_EXE_portascript");
+    let script = scripts_dir().join(name);
+    let output = Command::new(bin)
+        .arg(&script)
+        .args(args)
+        .output()
+        .expect("failed to run portascript");
+    ScriptResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        code: output.status.code().unwrap_or(-1),
+    }
+}
+
+// --- Step 1: Empty script ---
+
+#[test]
+fn test_001_empty() {
+    let r = run_script("001_empty.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "");
+    assert_eq!(r.stderr, "");
+}
+
+// --- Step 2: Comment ---
+
+#[test]
+fn test_002_comment() {
+    let r = run_script("002_comment.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "");
+    assert_eq!(r.stderr, "");
+}
+
+// --- Step 3: Whitespace/blank lines ---
+
+#[test]
+fn test_003_whitespace() {
+    let r = run_script("003_whitespace.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "");
+    assert_eq!(r.stderr, "");
+}
+
+// --- Step 4: print("hello") ---
+
+#[test]
+fn test_004_print_string() {
+    let r = run_script("004_print_string.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "hello");
+    assert_eq!(r.stderr, "");
+}
+
+// --- Step 5: print numbers ---
+
+#[test]
+fn test_005_print_numbers() {
+    let r = run_script("005_print_numbers.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "423.14");
+}
+
+// --- Step 6: print booleans ---
+
+#[test]
+fn test_006_print_bools() {
+    let r = run_script("006_print_bools.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "truefalse");
+}
+
+// --- Step 7: let binding ---
+
+#[test]
+fn test_007_let_binding() {
+    let r = run_script("007_let_binding.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "world");
+}
+
+// --- Step 8: let mut + reassignment ---
+
+#[test]
+fn test_008_let_mut() {
+    let r = run_script("008_let_mut.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "2");
+}
+
+// --- Step 9: immutable reassignment error ---
+
+#[test]
+fn test_009_immutable_error() {
+    let r = run_script("009_immutable_error.psc");
+    assert_ne!(r.code, 0);
+    assert!(r.stderr.contains("immutable"), "stderr: {}", r.stderr);
+}
+
+// --- Step 10: arithmetic ---
+
+#[test]
+fn test_010_arithmetic() {
+    let r = run_script("010_arithmetic.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "163");
+}
+
+// --- Step 11: string concatenation ---
+
+#[test]
+fn test_011_string_concat() {
+    let r = run_script("011_string_concat.psc");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "hello world");
+}

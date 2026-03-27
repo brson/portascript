@@ -1,54 +1,44 @@
-#![allow(unused)]
-
-use rmx::prelude::*;
-
-use rmx::clap::{self, Parser as _};
 use rmx::std::path::PathBuf;
 
-fn main() -> AnyResult<()> {
-    rmx::extras::init_crate_name(env!("CARGO_CRATE_NAME"));
+use rmx::clap::{self, Parser as _};
 
+fn main() {
     let cli = Cli::parse();
-    cli.run()?;
 
-    Ok(())
-}
+    let source = match rmx::std::fs::read_to_string(&cli.script) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("portascript: {}: {}", cli.script.display(), e);
+            std::process::exit(1);
+        }
+    };
 
-#[derive(clap::Parser)]
-struct Cli {
-    #[command(subcommand)]
-    cmd: Command,
-    #[command(flatten)]
-    args: Args,
-}
+    let mut args: Vec<String> = vec![cli.script.display().to_string()];
+    args.extend(cli.args);
 
-#[derive(clap::Subcommand)]
-enum Command {
-    Run(RunCommand),
-}
+    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
 
-#[derive(clap::Args)]
-struct Args {
-    #[arg(default_value = "config.toml")]
-    config_path: PathBuf,
-}
-
-#[derive(clap::Args)]
-struct RunCommand {
-}
-
-impl Cli {
-    fn run(&self) -> AnyResult<()> {
-        match &self.cmd {
-            Command::Run(cmd) => cmd.run(&self.args),
+    match portascript::interpret(&source, args, &mut stdout, &mut stderr) {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            // Flush stdout before writing error to stderr.
+            use std::io::Write;
+            let _ = stdout.flush();
+            drop(stdout);
+            eprintln!("portascript: {}", e);
+            std::process::exit(1);
         }
     }
 }
 
-impl RunCommand {
-    fn run(&self, _args: &Args) -> AnyResult<()> {
-        info!("hello world");
+#[derive(clap::Parser)]
+#[command(name = "portascript")]
+struct Cli {
+    /// Script file to execute.
+    script: PathBuf,
 
-        Ok(())
-    }
+    /// Arguments passed to the script.
+    #[arg(trailing_var_arg = true)]
+    args: Vec<String>,
 }
