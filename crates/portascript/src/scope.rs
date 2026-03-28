@@ -68,4 +68,45 @@ impl Scope {
             col,
         })
     }
+
+    /// Set a value at an index within a mutable variable (map[key] = val).
+    pub fn index_set(&mut self, name: &str, index: Value, value: Value, line: usize, col: usize) -> Result<(), PsError> {
+        for frame in self.frames.iter_mut().rev() {
+            if let Some(entry) = frame.get_mut(name) {
+                if !entry.mutable {
+                    return Err(PsError {
+                        message: format!("cannot assign to immutable variable '{}'", name),
+                        line, col,
+                    });
+                }
+                match (&mut entry.value, index) {
+                    (Value::Map(m), Value::Str(key)) => {
+                        m.insert(key, value);
+                        return Ok(());
+                    }
+                    (Value::List(items), Value::Int(i)) => {
+                        let idx = if i < 0 { items.len() as i64 + i } else { i } as usize;
+                        if idx < items.len() {
+                            items[idx] = value;
+                            return Ok(());
+                        }
+                        return Err(PsError {
+                            message: format!("index {} out of bounds (len {})", i, items.len()),
+                            line, col,
+                        });
+                    }
+                    _ => {
+                        return Err(PsError {
+                            message: format!("cannot index-assign to {}", entry.value.type_name()),
+                            line, col,
+                        });
+                    }
+                }
+            }
+        }
+        Err(PsError {
+            message: format!("undefined variable '{}'", name),
+            line, col,
+        })
+    }
 }

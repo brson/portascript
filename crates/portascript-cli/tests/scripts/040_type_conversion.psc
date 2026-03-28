@@ -1,0 +1,5 @@
+let x = int("42")
+let y = float("3.14")
+print(x + 1)
+print(y)
+print(typeof(x))

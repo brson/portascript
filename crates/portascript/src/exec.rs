@@ -30,6 +30,8 @@ pub struct Executor<'a> {
     token_stack: Vec<(Vec<Token>, usize)>,
     scope: Scope,
     functions: std::collections::HashMap<String, UserFunction>,
+    /// Set by exit() builtin.
+    exit_code: Option<i32>,
 }
 
 impl<'a> Executor<'a> {
@@ -45,6 +47,7 @@ impl<'a> Executor<'a> {
             token_stack: Vec::new(),
             scope: Scope::new(),
             functions: std::collections::HashMap::new(),
+            exit_code: None,
         }
     }
 
@@ -157,18 +160,22 @@ impl<'a> Executor<'a> {
     // --- Main execution loop ---
 
     /// Execute a source string.
-    pub fn run(&mut self, source: &str) -> Result<i32, PsError> {
+    pub fn run(&mut self, source: &str, args: Vec<String>) -> Result<i32, PsError> {
+        // Populate args as a builtin variable.
+        let args_list: Vec<Value> = args.into_iter().map(Value::Str).collect();
+        self.scope.declare("args", Value::List(args_list), false);
+
         self.tokenizer = Some(Tokenizer::new(source));
-        match self.exec_statements()? {
-            ControlFlow::Normal => Ok(0),
-            ControlFlow::Return(_) => Ok(0),
-            _ => Ok(0),
-        }
+        self.exec_statements()?;
+        Ok(self.exit_code.unwrap_or(0))
     }
 
     /// Execute statements until Eof or a control flow signal.
     fn exec_statements(&mut self) -> Result<ControlFlow, PsError> {
         loop {
+            if self.exit_code.is_some() {
+                return Ok(ControlFlow::Normal);
+            }
             let tok = self.next_token()?;
             if tok == Token::Eof {
                 return Ok(ControlFlow::Normal);
@@ -670,6 +677,17 @@ impl<'a> Executor<'a> {
                 self.scope.set(&name, value, line, col)?;
                 Ok(())
             }
+            Token::LBracket => {
+                // Indexed assignment: name[key] = val
+                self.next_token()?; // consume [
+                let index = self.parse_expr()?;
+                self.expect(&Token::RBracket)?;
+                self.expect(&Token::Eq)?;
+                let value = self.parse_expr()?;
+                let (line, col) = self.pos();
+                self.scope.index_set(&name, index, value, line, col)?;
+                Ok(())
+            }
             _ => {
                 let (line, col) = self.pos();
                 Err(PsError {
@@ -758,6 +776,177 @@ impl<'a> Executor<'a> {
                 writeln!(self.stderr, "{}", args[0].to_str()).ok();
                 Ok(Some(None))
             }
+
+            // Type conversion.
+            "int" => {
+                let val = &args[0];
+                let n = match val {
+                    Value::Int(n) => *n,
+                    Value::Float(f) => *f as i64,
+                    Value::Str(s) => s.parse::<i64>().map_err(|_| {
+                        let (line, col) = self.pos();
+                        PsError { message: format!("cannot convert '{}' to int", s), line, col }
+                    })?,
+                    Value::Bool(b) => if *b { 1 } else { 0 },
+                    _ => {
+                        let (line, col) = self.pos();
+                        return Err(PsError { message: format!("cannot convert {} to int", val.type_name()), line, col });
+                    }
+                };
+                Ok(Some(Some(Value::Int(n))))
+            }
+            "float" => {
+                let val = &args[0];
+                let f = match val {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    Value::Str(s) => s.parse::<f64>().map_err(|_| {
+                        let (line, col) = self.pos();
+                        PsError { message: format!("cannot convert '{}' to float", s), line, col }
+                    })?,
+                    _ => {
+                        let (line, col) = self.pos();
+                        return Err(PsError { message: format!("cannot convert {} to float", val.type_name()), line, col });
+                    }
+                };
+                Ok(Some(Some(Value::Float(f))))
+            }
+            "str" => Ok(Some(Some(Value::Str(args[0].to_str())))),
+            "typeof" => Ok(Some(Some(Value::Str(args[0].type_name().to_string())))),
+
+            // String functions.
+            "len" => {
+                match &args[0] {
+                    Value::Str(s) => Ok(Some(Some(Value::Int(s.len() as i64)))),
+                    Value::List(l) => Ok(Some(Some(Value::Int(l.len() as i64)))),
+                    Value::Map(m) => Ok(Some(Some(Value::Int(m.len() as i64)))),
+                    _ => {
+                        let (line, col) = self.pos();
+                        Err(PsError { message: format!("len() not supported for {}", args[0].type_name()), line, col })
+                    }
+                }
+            }
+            "trim" => Ok(Some(Some(Value::Str(args[0].to_str().trim().to_string())))),
+            "upper" => Ok(Some(Some(Value::Str(args[0].to_str().to_uppercase())))),
+            "lower" => Ok(Some(Some(Value::Str(args[0].to_str().to_lowercase())))),
+            "split" => {
+                let s = args[0].to_str();
+                let delim = args[1].to_str();
+                let parts: Vec<Value> = s.split(&delim).map(|p| Value::Str(p.to_string())).collect();
+                Ok(Some(Some(Value::List(parts))))
+            }
+            "join" => {
+                match &args[0] {
+                    Value::List(items) => {
+                        let delim = args[1].to_str();
+                        let s: Vec<String> = items.iter().map(|v| v.to_str()).collect();
+                        Ok(Some(Some(Value::Str(s.join(&delim)))))
+                    }
+                    _ => {
+                        let (line, col) = self.pos();
+                        Err(PsError { message: "join() requires a list".into(), line, col })
+                    }
+                }
+            }
+            "lines" => {
+                let s = args[0].to_str();
+                let parts: Vec<Value> = s.lines().map(|l| Value::Str(l.to_string())).collect();
+                Ok(Some(Some(Value::List(parts))))
+            }
+            "contains" => {
+                let s = args[0].to_str();
+                let sub = args[1].to_str();
+                Ok(Some(Some(Value::Bool(s.contains(&sub)))))
+            }
+            "starts_with" => {
+                Ok(Some(Some(Value::Bool(args[0].to_str().starts_with(&args[1].to_str())))))
+            }
+            "ends_with" => {
+                Ok(Some(Some(Value::Bool(args[0].to_str().ends_with(&args[1].to_str())))))
+            }
+            "replace" => {
+                let s = args[0].to_str();
+                let old = args[1].to_str();
+                let new = args[2].to_str();
+                Ok(Some(Some(Value::Str(s.replace(&old, &new)))))
+            }
+
+            // List functions.
+            "append" => {
+                match &args[0] {
+                    Value::List(items) => {
+                        let mut new_items = items.clone();
+                        new_items.push(args[1].clone());
+                        Ok(Some(Some(Value::List(new_items))))
+                    }
+                    _ => {
+                        let (line, col) = self.pos();
+                        Err(PsError { message: "append() requires a list".into(), line, col })
+                    }
+                }
+            }
+            "range" => {
+                let (start, end) = if args.len() == 1 {
+                    (0i64, match &args[0] { Value::Int(n) => *n, _ => {
+                        let (line, col) = self.pos();
+                        return Err(PsError { message: "range() requires int arguments".into(), line, col });
+                    }})
+                } else {
+                    (match &args[0] { Value::Int(n) => *n, _ => {
+                        let (line, col) = self.pos();
+                        return Err(PsError { message: "range() requires int arguments".into(), line, col });
+                    }}, match &args[1] { Value::Int(n) => *n, _ => {
+                        let (line, col) = self.pos();
+                        return Err(PsError { message: "range() requires int arguments".into(), line, col });
+                    }})
+                };
+                let items: Vec<Value> = (start..end).map(Value::Int).collect();
+                Ok(Some(Some(Value::List(items))))
+            }
+
+            // Map functions.
+            "keys" => {
+                match &args[0] {
+                    Value::Map(m) => {
+                        let ks: Vec<Value> = m.keys().map(|k| Value::Str(k.clone())).collect();
+                        Ok(Some(Some(Value::List(ks))))
+                    }
+                    _ => {
+                        let (line, col) = self.pos();
+                        Err(PsError { message: "keys() requires a map".into(), line, col })
+                    }
+                }
+            }
+            "has_key" => {
+                match &args[0] {
+                    Value::Map(m) => {
+                        let key = args[1].to_str();
+                        Ok(Some(Some(Value::Bool(m.contains_key(&key)))))
+                    }
+                    _ => {
+                        let (line, col) = self.pos();
+                        Err(PsError { message: "has_key() requires a map".into(), line, col })
+                    }
+                }
+            }
+
+            // Control flow.
+            "exit" => {
+                let code = if args.is_empty() { 0 } else {
+                    match &args[0] {
+                        Value::Int(n) => *n as i32,
+                        _ => 1,
+                    }
+                };
+                self.exit_code = Some(code);
+                Ok(Some(None))
+            }
+            "error" => {
+                let msg = if args.is_empty() { "error".to_string() } else { args[0].to_str() };
+                let (line, col) = self.pos();
+                Err(PsError { message: msg, line, col })
+            }
+
             _ => Ok(None), // Not a builtin.
         }
     }
@@ -927,6 +1116,7 @@ impl<'a> Executor<'a> {
                 Token::GtEq => (">=", true, false),
                 Token::And => ("and", false, true),
                 Token::Or => ("or", false, true),
+                Token::QuestionQuestion => ("??", false, true),
                 _ => break,
             };
 
@@ -941,6 +1131,13 @@ impl<'a> Executor<'a> {
                 lhs = match op {
                     "and" => Value::Bool(lhs.is_truthy() && rhs.is_truthy()),
                     "or" => Value::Bool(lhs.is_truthy() || rhs.is_truthy()),
+                    "??" => {
+                        // Coalesce: return lhs if non-empty string, else rhs.
+                        match &lhs {
+                            Value::Str(s) if !s.is_empty() => lhs,
+                            _ => rhs,
+                        }
+                    }
                     _ => unreachable!(),
                 };
             } else if is_cmp {
@@ -993,6 +1190,32 @@ impl<'a> Executor<'a> {
                 }
             }
         }
+        // Postfix: index access [i].
+        while *self.peek_token()? == Token::LBracket {
+            self.next_token()?; // consume '['
+            let index = self.parse_expr()?;
+            self.expect(&Token::RBracket)?;
+            let (line, col) = self.pos();
+            match (&val, &index) {
+                (Value::List(items), Value::Int(i)) => {
+                    let idx = if *i < 0 { items.len() as i64 + i } else { *i } as usize;
+                    val = items.get(idx).cloned().ok_or_else(|| {
+                        PsError { message: format!("index {} out of bounds (len {})", i, items.len()), line, col }
+                    })?;
+                }
+                (Value::Map(m), Value::Str(key)) => {
+                    val = m.get(key).cloned().ok_or_else(|| {
+                        PsError { message: format!("key '{}' not found in map", key), line, col }
+                    })?;
+                }
+                _ => {
+                    return Err(PsError {
+                        message: format!("cannot index {} with {}", val.type_name(), index.type_name()),
+                        line, col,
+                    });
+                }
+            }
+        }
         Ok(val)
     }
 
@@ -1033,6 +1256,56 @@ impl<'a> Executor<'a> {
             }
             Token::DollarParen => self.parse_capture(),
             Token::Try => self.parse_try(),
+            Token::Env => {
+                // env.VAR_NAME
+                self.expect(&Token::Dot)?;
+                let var_name = match self.next_token()? {
+                    Token::Ident(s) => s,
+                    other => {
+                        let (line, col) = self.pos();
+                        return Err(PsError {
+                            message: format!("expected env var name after 'env.', got {:?}", other),
+                            line, col,
+                        });
+                    }
+                };
+                let val = std::env::var(&var_name).unwrap_or_default();
+                Ok(Value::Str(val))
+            }
+            Token::LBrace => {
+                // Map literal {key: val, ...}.
+                let mut map = IndexMap::new();
+                loop {
+                    self.skip_newlines()?;
+                    if *self.peek_token()? == Token::RBrace {
+                        self.next_token()?;
+                        break;
+                    }
+                    if !map.is_empty() {
+                        self.expect(&Token::Comma)?;
+                        self.skip_newlines()?;
+                        if *self.peek_token()? == Token::RBrace {
+                            self.next_token()?;
+                            break;
+                        }
+                    }
+                    let key = match self.next_token()? {
+                        Token::Ident(s) => s,
+                        Token::StringLit(s) => s,
+                        other => {
+                            let (line, col) = self.pos();
+                            return Err(PsError {
+                                message: format!("expected map key, got {:?}", other),
+                                line, col,
+                            });
+                        }
+                    };
+                    self.expect(&Token::Colon)?;
+                    let val = self.parse_expr()?;
+                    map.insert(key, val);
+                }
+                Ok(Value::Map(map))
+            }
             Token::Ident(name) => {
                 if *self.peek_token()? == Token::LParen {
                     match self.call_function(&name)? {
@@ -1197,11 +1470,12 @@ enum MatchPattern {
 
 fn infix_binding_power(op: &str) -> (u8, u8) {
     match op {
-        "or" => (1, 2),
-        "and" => (3, 4),
-        "==" | "!=" | "<" | ">" | "<=" | ">=" => (5, 6),
-        "+" | "-" => (7, 8),
-        "*" | "/" | "%" => (9, 10),
+        "??" => (1, 2),
+        "or" => (3, 4),
+        "and" => (5, 6),
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => (7, 8),
+        "+" | "-" => (9, 10),
+        "*" | "/" | "%" => (11, 12),
         _ => (0, 0),
     }
 }

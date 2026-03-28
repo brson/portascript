@@ -27,11 +27,11 @@ impl std::error::Error for PsError {}
 /// Returns the exit code.
 pub fn interpret(
     source: &str,
-    _args: Vec<String>,
+    args: Vec<String>,
     stdout: &mut dyn std::io::Write,
     stderr: &mut dyn std::io::Write,
 ) -> AnyResult<i32> {
     let mut executor = exec::Executor::new(stdout, stderr);
-    let code = executor.run(source)?;
+    let code = executor.run(source, args)?;
     Ok(code)
 }

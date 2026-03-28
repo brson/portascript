@@ -1,5 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[allow(unused_imports)]
+use tempfile;
 
 struct ScriptResult {
     stdout: String,
@@ -25,13 +28,27 @@ fn run_script(name: &str) -> ScriptResult {
     }
 }
 
-#[allow(dead_code)]
 fn run_script_with_args(name: &str, args: &[&str]) -> ScriptResult {
     let bin = env!("CARGO_BIN_EXE_portascript");
     let script = scripts_dir().join(name);
     let output = Command::new(bin)
         .arg(&script)
         .args(args)
+        .output()
+        .expect("failed to run portascript");
+    ScriptResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        code: output.status.code().unwrap_or(-1),
+    }
+}
+
+fn run_script_in_dir(name: &str, dir: &Path) -> ScriptResult {
+    let bin = env!("CARGO_BIN_EXE_portascript");
+    let script = scripts_dir().join(name);
+    let output = Command::new(bin)
+        .arg(&script)
+        .current_dir(dir)
         .output()
         .expect("failed to run portascript");
     ScriptResult {
@@ -359,4 +376,123 @@ fn test_035_pipeline_capture() {
     let r = run_script("035_pipeline_capture.psc");
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "hello world");
+}
+
+// --- Step 36: run cat ---
+
+#[test]
+fn test_036_run_cat() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("test.txt"), "hello").unwrap();
+    let r = run_script_in_dir("036_run_cat.psc", dir.path());
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello");
+}
+
+// --- Step 37: run true/false ---
+
+#[test]
+fn test_037_run_true_false() {
+    let r = run_script("037_run_true_false.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "false");
+}
+
+// --- Step 38: string builtins ---
+
+#[test]
+fn test_038_string_builtins() {
+    let r = run_script("038_string_builtins.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "11a-b-c");
+}
+
+// --- Step 39: more string builtins ---
+
+#[test]
+fn test_039_more_string_builtins() {
+    let r = run_script("039_more_string_builtins.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "3trueHELLO");
+}
+
+// --- Step 40: type conversion ---
+
+#[test]
+fn test_040_type_conversion() {
+    let r = run_script("040_type_conversion.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "433.14int");
+}
+
+// --- Step 41: list ops ---
+
+#[test]
+fn test_041_list_ops() {
+    let r = run_script("041_list_ops.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "a34");
+}
+
+// --- Step 42: map ops ---
+
+#[test]
+fn test_042_map_ops() {
+    let r = run_script("042_map_ops.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "alicetrue2name,age");
+}
+
+// --- Step 43: map mutation ---
+
+#[test]
+fn test_043_map_mut() {
+    let r = run_script("043_map_mut.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "2");
+}
+
+// --- Step 44: range ---
+
+#[test]
+fn test_044_range() {
+    let r = run_script("044_range.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "6");
+}
+
+// --- Step 45: env ---
+
+#[test]
+fn test_045_env() {
+    let r = run_script("045_env.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "strdefault");
+}
+
+// --- Step 46: exit ---
+
+#[test]
+fn test_046_exit() {
+    let r = run_script("046_exit.psc");
+    assert_eq!(r.code, 42);
+    assert_eq!(r.stdout, "before");
+}
+
+// --- Step 47: error ---
+
+#[test]
+fn test_047_error() {
+    let r = run_script("047_error.psc");
+    assert_ne!(r.code, 0);
+    assert!(r.stderr.contains("something went wrong"), "stderr: {}", r.stderr);
+}
+
+// --- Step 48: args ---
+
+#[test]
+fn test_048_args() {
+    let r = run_script_with_args("048_args.psc", &["hello"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "2hello");
 }

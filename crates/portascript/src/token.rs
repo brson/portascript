@@ -45,6 +45,7 @@ pub enum Token {
     Return,
     Match,
     Try,
+    Env,
     And,
     Or,
     Not,
@@ -66,6 +67,7 @@ pub enum Token {
     Dot,
     Question,
     Pipe,
+    QuestionQuestion, // ??
 
     /// A bare word in command mode (flags, paths, etc.).
     BareWord(String),
@@ -295,6 +297,7 @@ impl Tokenizer {
             "return" => Token::Return,
             "match" => Token::Match,
             "try" => Token::Try,
+            "env" => Token::Env,
             "and" => Token::And,
             "or" => Token::Or,
             "not" => Token::Not,
@@ -506,7 +509,12 @@ impl Tokenizer {
             }
             Some('?') => {
                 self.advance();
-                Ok(Token::Question)
+                if self.peek() == Some('?') {
+                    self.advance();
+                    Ok(Token::QuestionQuestion)
+                } else {
+                    Ok(Token::Question)
+                }
             }
             Some('|') => {
                 self.advance();

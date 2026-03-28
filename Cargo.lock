@@ -2794,7 +2794,10 @@ dependencies = [
  "indexmap",
  "os_pipe",
  "rustmax",
+ "uu_cat",
  "uu_echo",
+ "uu_false",
+ "uu_true",
  "uucore",
 ]
 
@@ -2804,6 +2807,7 @@ version = "0.1.0"
 dependencies = [
  "portascript",
  "rustmax",
+ "tempfile",
 ]
 
 [[package]]
@@ -4319,10 +4323,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
+name = "uu_cat"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "043b7b9873244298be72a26057d1d85a0129497817c304ff7d1a2a1a0b27b335"
+dependencies = [
+ "clap",
+ "fluent",
+ "memchr",
+ "nix 0.30.1",
+ "thiserror 2.0.18",
+ "uucore",
+ "winapi-util",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "uu_echo"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a77f4d0beb31487fe8f4b9202ffc118b9561dda1341e3dd6d3bb52991bfbd58d"
+dependencies = [
+ "clap",
+ "fluent",
+ "uucore",
+]
+
+[[package]]
+name = "uu_false"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a963cd94c29de3678273df72ca60857f6ffe6af5a3ede672cb4bc79a11ef22"
+dependencies = [
+ "clap",
+ "fluent",
+ "uucore",
+]
+
+[[package]]
+name = "uu_true"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfec486c633bf98e354373f7d0ec26910e51376ddfeea29b2fd8a2d2f3d96736"
 dependencies = [
  "clap",
  "fluent",
@@ -4337,11 +4379,13 @@ checksum = "a8038531f506a34ab4612b93f97d5f40759768cd34a83fd2af041b84fcbde474"
 dependencies = [
  "bigdecimal",
  "clap",
+ "dunce",
  "fluent",
  "fluent-bundle",
  "fluent-syntax",
  "icu_locale",
  "itertools 0.14.0",
+ "libc",
  "nix 0.30.1",
  "num-traits",
  "os_display",
@@ -4351,6 +4395,8 @@ dependencies = [
  "unit-prefix",
  "uucore_procs",
  "wild",
+ "winapi-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
