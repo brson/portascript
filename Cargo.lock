@@ -2794,6 +2794,7 @@ dependencies = [
  "indexmap",
  "os_pipe",
  "rustmax",
+ "tempfile",
  "uu_cat",
  "uu_echo",
  "uu_false",

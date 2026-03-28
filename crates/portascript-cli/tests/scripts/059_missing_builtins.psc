@@ -1,0 +1,5 @@
+let p = path.abs(".")
+print(path.is_dir(p))
+print(pid() > 0)
+print(command_exists("sh"))
+print(command_exists("nonexistent_cmd_xyzzy"))

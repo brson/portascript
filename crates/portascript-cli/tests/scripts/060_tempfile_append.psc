@@ -1,0 +1,5 @@
+let tmp = tempfile()
+append_file(tmp, "hello\n")
+append_file(tmp, "world\n")
+let content = read(tmp)
+print(len(lines(content)))

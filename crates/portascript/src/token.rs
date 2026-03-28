@@ -65,6 +65,7 @@ pub enum Token {
     Arrow,    // =>
     Colon,
     Dot,
+    DotDot,
     Question,
     Pipe,
     QuestionQuestion, // ??
@@ -618,7 +619,12 @@ impl Tokenizer {
             }
             Some('.') => {
                 self.advance();
-                Ok(Token::Dot)
+                if self.peek() == Some('.') {
+                    self.advance();
+                    Ok(Token::DotDot)
+                } else {
+                    Ok(Token::Dot)
+                }
             }
             Some('?') => {
                 self.advance();

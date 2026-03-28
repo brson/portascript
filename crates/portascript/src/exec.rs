@@ -538,16 +538,12 @@ impl<'a> Executor<'a> {
                 break;
             }
 
-            // Parse pattern(s): expr (| expr)* => stmt_or_block
-            let patterns = vec![self.parse_match_pattern()?];
-            while *self.peek_token()? == Token::BareWord("_".into()) || false {
-                break; // No | handling needed for single patterns.
+            // Parse pattern(s): pattern (| pattern)* =>
+            let mut patterns = vec![self.parse_match_pattern()?];
+            while *self.peek_token()? == Token::Pipe {
+                self.next_token()?; // consume |
+                patterns.push(self.parse_match_pattern()?);
             }
-            // Check for | alternation.
-            // Actually, we just parsed one pattern. Now check for |.
-            // But | is not a token in expression mode. Let me handle it as a bare check.
-            // The `|` is used in pipelines. In match context it's an alternation separator.
-            // For now, skip | support in match -- just handle single patterns and _.
 
             self.expect(&Token::Arrow)?;
 
@@ -570,10 +566,10 @@ impl<'a> Executor<'a> {
             };
 
             if !matched {
-                let pattern_matches = match &patterns[0] {
+                let pattern_matches = patterns.iter().any(|p| match p {
                     MatchPattern::Wildcard => true,
                     MatchPattern::Value(v) => *v == match_val,
-                };
+                });
                 if pattern_matches {
                     matched = true;
                     let cf = self.exec_block(&arm_body)?;
@@ -1006,6 +1002,45 @@ impl<'a> Executor<'a> {
             "path.is_dir" => {
                 Ok(Some(Some(Value::Bool(std::path::Path::new(&args[0].to_str()).is_dir()))))
             }
+            "path.is_socket" => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileTypeExt;
+                    let is_sock = std::fs::metadata(&args[0].to_str())
+                        .map(|m| m.file_type().is_socket())
+                        .unwrap_or(false);
+                    Ok(Some(Some(Value::Bool(is_sock))))
+                }
+                #[cfg(not(unix))]
+                {
+                    Ok(Some(Some(Value::Bool(false))))
+                }
+            }
+            "path.abs" => {
+                let s = args[0].to_str();
+                let abs = std::fs::canonicalize(&s)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&s).canonicalize()
+                        .unwrap_or_else(|_| {
+                            let mut cwd = std::env::current_dir().unwrap_or_default();
+                            cwd.push(&s);
+                            cwd
+                        }));
+                Ok(Some(Some(Value::Str(abs.display().to_string()))))
+            }
+
+            // Process functions.
+            "pid" => {
+                Ok(Some(Some(Value::Int(std::process::id() as i64))))
+            }
+            "command_exists" => {
+                let name = args[0].to_str();
+                let found = std::env::var_os("PATH")
+                    .map(|paths| {
+                        std::env::split_paths(&paths).any(|dir| dir.join(&name).is_file())
+                    })
+                    .unwrap_or(false);
+                Ok(Some(Some(Value::Bool(found))))
+            }
 
             // Filesystem functions.
             "read" => {
@@ -1024,6 +1059,32 @@ impl<'a> Executor<'a> {
                     PsError { message: format!("write({}): {}", path, e), line, col }
                 })?;
                 Ok(Some(None))
+            }
+            "append_file" => {
+                use std::io::Write;
+                let path = args[0].to_str();
+                let content = args[1].to_str();
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true).append(true).open(&path)
+                    .map_err(|e| {
+                        let (line, col) = self.pos();
+                        PsError { message: format!("append_file({}): {}", path, e), line, col }
+                    })?;
+                f.write_all(content.as_bytes()).map_err(|e| {
+                    let (line, col) = self.pos();
+                    PsError { message: format!("append_file({}): {}", path, e), line, col }
+                })?;
+                Ok(Some(None))
+            }
+            "tempfile" => {
+                let tmp = tempfile::NamedTempFile::new().map_err(|e| {
+                    let (line, col) = self.pos();
+                    PsError { message: format!("tempfile(): {}", e), line, col }
+                })?;
+                let path = tmp.path().to_string_lossy().into_owned();
+                // Keep the file alive by leaking it (it persists until process exit).
+                let _ = tmp.into_temp_path();
+                Ok(Some(Some(Value::Str(path))))
             }
 
             _ => Ok(None), // Not a builtin.
@@ -1199,36 +1260,27 @@ impl<'a> Executor<'a> {
                 Token::LBrace => {
                     // Read the identifier/expression.
                     let val = self.parse_primary()?;
-                    // Check for spread: ... followed by }
-                    if *self.peek_token()? == Token::Dot {
-                        self.next_token()?;
-                        if *self.peek_token()? == Token::Dot {
-                            self.next_token()?;
-                            if *self.peek_token()? == Token::Dot {
-                                self.next_token()?;
-                                self.expect(&Token::RBrace)?;
-                                match val {
-                                    Value::List(items) => {
-                                        for item in items {
-                                            args.push(item.to_str());
-                                        }
-                                    }
-                                    _ => {
-                                        let (line, col) = self.pos();
-                                        return Err(PsError {
-                                            message: format!("cannot spread {}", val.type_name()),
-                                            line, col,
-                                        });
-                                    }
+                    // Check for spread: `...}` after expr.
+                    // `...` tokenizes as DotDot + Dot.
+                    if *self.peek_token()? == Token::DotDot {
+                        self.next_token()?; // consume ..
+                        self.expect(&Token::Dot)?; // consume .
+                        self.expect(&Token::RBrace)?;
+                        match val {
+                            Value::List(items) => {
+                                for item in items {
+                                    args.push(item.to_str());
                                 }
-                                continue;
+                            }
+                            _ => {
+                                let (line, col) = self.pos();
+                                return Err(PsError {
+                                    message: format!("cannot spread {}", val.type_name()),
+                                    line, col,
+                                });
                             }
                         }
-                        let (line, col) = self.pos();
-                        return Err(PsError {
-                            message: "unexpected '.' in command args".into(),
-                            line, col,
-                        });
+                        continue;
                     }
                     self.expect(&Token::RBrace)?;
                     args.push(val.to_str());
@@ -1343,12 +1395,43 @@ impl<'a> Executor<'a> {
                 }
             }
         }
-        // Postfix: index access [i].
+        // Postfix: index access [i] and slice [i..j].
         while *self.peek_token()? == Token::LBracket {
             self.next_token()?; // consume '['
-            let index = self.parse_expr()?;
-            self.expect(&Token::RBracket)?;
             let (line, col) = self.pos();
+
+            // Check for slice syntax: [start..end] or [start..] or [..end].
+            let index = self.parse_expr()?;
+            if *self.peek_token()? == Token::DotDot {
+                self.next_token()?; // consume ..
+                // Slice: val[start..end] or val[start..]
+                let start = match &index {
+                    Value::Int(n) => *n as usize,
+                    _ => return Err(PsError { message: "slice start must be int".into(), line, col }),
+                };
+                let end = if *self.peek_token()? == Token::RBracket {
+                    None // open-ended
+                } else {
+                    let end_val = self.parse_expr()?;
+                    match end_val {
+                        Value::Int(n) => Some(n as usize),
+                        _ => return Err(PsError { message: "slice end must be int".into(), line, col }),
+                    }
+                };
+                self.expect(&Token::RBracket)?;
+                match &val {
+                    Value::List(items) => {
+                        let end = end.unwrap_or(items.len());
+                        val = Value::List(items[start..end].to_vec());
+                    }
+                    _ => return Err(PsError {
+                        message: format!("cannot slice {}", val.type_name()), line, col,
+                    }),
+                }
+                continue;
+            }
+
+            self.expect(&Token::RBracket)?;
             match (&val, &index) {
                 (Value::List(items), Value::Int(i)) => {
                     let idx = if *i < 0 { items.len() as i64 + i } else { *i } as usize;

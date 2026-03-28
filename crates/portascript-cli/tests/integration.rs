@@ -579,3 +579,39 @@ fn test_058_semicolons() {
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "3");
 }
+
+// --- Step 59: missing builtins (path.abs, pid, command_exists, path.is_socket) ---
+
+#[test]
+fn test_059_missing_builtins() {
+    let r = run_script("059_missing_builtins.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "truetruetruefalse");
+}
+
+// --- Step 60: tempfile + append_file ---
+
+#[test]
+fn test_060_tempfile_append() {
+    let r = run_script("060_tempfile_append.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "2");
+}
+
+// --- Step 61: slice syntax ---
+
+#[test]
+fn test_061_slice() {
+    let r = run_script("061_slice.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "b,c,db,c");
+}
+
+// --- Step 62: match alternation ---
+
+#[test]
+fn test_062_match_alternation() {
+    let r = run_script("062_match_alternation.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "known");
+}
