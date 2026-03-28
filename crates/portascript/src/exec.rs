@@ -148,12 +148,13 @@ impl<'a> Executor<'a> {
 
     /// Execute a buffered block of tokens.
     fn exec_block(&mut self, tokens: &[Token]) -> Result<ControlFlow, PsError> {
+        let saved_peeked = self.peeked.take();
         self.token_stack.push((tokens.to_vec(), 0));
         self.scope.push();
         let result = self.exec_statements();
         self.scope.pop();
         self.token_stack.pop();
-        self.peeked = None; // Clear stale peeked tokens from the buffer.
+        self.peeked = saved_peeked;
         result
     }
 
@@ -1715,10 +1716,11 @@ impl<'a> Executor<'a> {
 
     /// Evaluate an expression from buffered tokens.
     fn eval_token_expr(&mut self, tokens: &[Token]) -> Result<Value, PsError> {
+        let saved_peeked = self.peeked.take();
         self.token_stack.push((tokens.to_vec(), 0));
         let val = self.parse_expr();
         self.token_stack.pop();
-        self.peeked = None; // Clear any leftover peeked token from the buffer.
+        self.peeked = saved_peeked;
         val
     }
 }
