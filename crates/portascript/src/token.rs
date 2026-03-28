@@ -309,12 +309,103 @@ impl Tokenizer {
     ///
     /// In command mode, bare words (flags, paths) are valid tokens.
     /// Stops at newline, `|`, or EOF.
+    /// Read a triple-quoted string (""" or ''').
+    /// If `interpolate` is true, processes `{expr}` and escape sequences (""").
+    /// If false, raw (''').
+    fn read_triple_string(&mut self, interpolate: bool) -> Result<Token, PsError> {
+        let (line, col) = (self.line, self.col);
+        let quote = self.peek().unwrap();
+        // Consume the three opening quotes.
+        self.advance();
+        self.advance();
+        self.advance();
+        // Skip optional newline after opening quotes.
+        if self.peek() == Some('\n') {
+            self.advance();
+        }
+
+        let mut content = String::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(PsError {
+                        message: "unterminated triple-quoted string".into(),
+                        line, col,
+                    });
+                }
+                Some(ch) if ch == quote => {
+                    // Check for closing triple quotes.
+                    if self.chars.get(self.pos + 1) == Some(&quote)
+                        && self.chars.get(self.pos + 2) == Some(&quote)
+                    {
+                        self.advance();
+                        self.advance();
+                        self.advance();
+                        break;
+                    }
+                    content.push(ch);
+                    self.advance();
+                }
+                Some('\\') if interpolate => {
+                    self.advance();
+                    match self.advance() {
+                        Some('n') => content.push('\n'),
+                        Some('t') => content.push('\t'),
+                        Some('\\') => content.push('\\'),
+                        Some('{') => content.push('{'),
+                        Some('"') => content.push('"'),
+                        Some(ch) => { content.push('\\'); content.push(ch); }
+                        None => content.push('\\'),
+                    }
+                }
+                Some(ch) => {
+                    content.push(ch);
+                    self.advance();
+                }
+            }
+        }
+
+        // Strip leading whitespace based on closing quotes indentation.
+        let content = Self::dedent_triple_string(&content);
+
+        // TODO: interpolation in triple-quoted strings. For now, return as plain string.
+        Ok(Token::StringLit(content))
+    }
+
+    /// Dedent a triple-quoted string based on the indentation of the last line.
+    fn dedent_triple_string(s: &str) -> String {
+        let lines: Vec<&str> = s.lines().collect();
+        if lines.is_empty() {
+            return String::new();
+        }
+        // The last line (before closing """) determines the indent to strip.
+        let last = lines.last().unwrap();
+        let indent = last.len() - last.trim_start().len();
+        // If the last line is all whitespace, it's the indent marker.
+        let (content_lines, strip) = if last.trim().is_empty() {
+            (&lines[..lines.len() - 1], indent)
+        } else {
+            (&lines[..], indent)
+        };
+        content_lines
+            .iter()
+            .map(|line| {
+                if line.len() >= strip && line[..strip].chars().all(|c| c == ' ') {
+                    &line[strip..]
+                } else {
+                    line.trim_start()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn next_cmd_token(&mut self) -> Result<Token, PsError> {
         self.skip_whitespace_no_newline();
 
         match self.peek() {
             None => Ok(Token::Eof),
-            Some('\n') => {
+            Some('\n') | Some(';') => {
                 self.advance();
                 Ok(Token::Newline)
             }
@@ -373,9 +464,19 @@ impl Tokenizer {
     pub fn next_token(&mut self) -> Result<Token, PsError> {
         self.skip_whitespace_no_newline();
 
+        // Line continuation: backslash at end of line.
+        if self.peek() == Some('\\') {
+            if self.chars.get(self.pos + 1) == Some(&'\n') {
+                self.advance(); // consume '\'
+                self.advance(); // consume '\n'
+                self.skip_whitespace_no_newline();
+                return self.next_token();
+            }
+        }
+
         match self.peek() {
             None => Ok(Token::Eof),
-            Some('\n') => {
+            Some('\n') | Some(';') => {
                 self.advance();
                 Ok(Token::Newline)
             }
@@ -390,10 +491,22 @@ impl Tokenizer {
                 }
                 Ok(Token::Comment(text))
             }
-            Some('"') => self.read_interp_string(),
+            Some('"') => {
+                // Check for triple-quoted string """.
+                if self.chars.get(self.pos + 1) == Some(&'"') && self.chars.get(self.pos + 2) == Some(&'"') {
+                    self.read_triple_string(true)
+                } else {
+                    self.read_interp_string()
+                }
+            }
             Some('\'') => {
-                let s = self.read_raw_string()?;
-                Ok(Token::StringLit(s))
+                // Check for triple-quoted raw string '''.
+                if self.chars.get(self.pos + 1) == Some(&'\'') && self.chars.get(self.pos + 2) == Some(&'\'') {
+                    self.read_triple_string(false)
+                } else {
+                    let s = self.read_raw_string()?;
+                    Ok(Token::StringLit(s))
+                }
             }
             Some('(') => {
                 self.advance();

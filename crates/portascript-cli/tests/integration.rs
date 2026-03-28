@@ -496,3 +496,86 @@ fn test_048_args() {
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "2hello");
 }
+
+// --- Step 49: list spread ---
+
+#[test]
+fn test_049_spread() {
+    let r = run_script("049_spread.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello world\n");
+}
+
+// --- Step 50: block scoping ---
+
+#[test]
+fn test_050_scoping() {
+    let r = run_script("050_scoping.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "innerouter");
+}
+
+// --- Step 51: path builtins ---
+
+#[test]
+fn test_051_path_builtins() {
+    let r = run_script("051_path_builtins.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    // path.join uses OS separator
+    assert_eq!(r.stdout, ".txtbazfoo/bar");
+}
+
+// --- Step 52: filesystem builtins ---
+
+#[test]
+fn test_052_filesystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = run_script_in_dir("052_filesystem.psc", dir.path());
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "2");
+}
+
+// --- Step 53: command modifier [ENV="val"] ---
+
+#[test]
+fn test_053_modifiers() {
+    let r = run_script("053_modifiers.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello");
+}
+
+// --- Step 54: stdin modifier ---
+
+#[test]
+fn test_054_stdin_modifier() {
+    let r = run_script("054_stdin_modifier.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello from stdin");
+}
+
+// --- Step 55: escape sequences + multiline strings ---
+
+#[test]
+fn test_055_strings_advanced() {
+    let r = run_script("055_strings_advanced.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "2hello\nworld");
+}
+
+// --- Step 57: line continuation ---
+
+#[test]
+fn test_057_continuation() {
+    let r = run_script("057_continuation.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "3");
+}
+
+// --- Step 58: semicolons ---
+
+#[test]
+fn test_058_semicolons() {
+    let r = run_script("058_semicolons.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "3");
+}

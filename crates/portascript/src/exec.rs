@@ -324,20 +324,43 @@ impl<'a> Executor<'a> {
     }
 
     fn exec_exec_inner(&mut self, capture: bool) -> Result<(i32, Option<String>), PsError> {
+        // Check for modifier bracket [ENV="val", stdin={expr}].
+        let modifiers = self.parse_cmd_modifiers()?;
         let args = self.parse_cmd_args()?;
         let (line, col) = self.pos();
         if args.is_empty() {
             return Err(PsError { message: "exec: missing command".into(), line, col });
         }
         let (cmd, cmd_args) = args.split_first().unwrap();
-        if capture {
-            let output = std::process::Command::new(cmd).args(cmd_args).output()
+
+        let needs_stdin = modifiers.stdin_data.is_some();
+
+        let mut command = std::process::Command::new(cmd);
+        command.args(cmd_args);
+        for (k, v) in &modifiers.env_vars {
+            command.env(k, v);
+        }
+
+        if capture || needs_stdin {
+            if needs_stdin {
+                command.stdin(std::process::Stdio::piped());
+            }
+            command.stdout(std::process::Stdio::piped());
+            let mut child = command.spawn()
+                .map_err(|e| PsError { message: format!("exec {}: {}", cmd, e), line, col })?;
+            if let Some(data) = &modifiers.stdin_data {
+                use std::io::Write;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(data.as_bytes()).ok();
+                }
+            }
+            let output = child.wait_with_output()
                 .map_err(|e| PsError { message: format!("exec {}: {}", cmd, e), line, col })?;
             let code = output.status.code().unwrap_or(1);
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             Ok((code, Some(stdout)))
         } else {
-            let status = std::process::Command::new(cmd).args(cmd_args).status()
+            let status = command.status()
                 .map_err(|e| PsError { message: format!("exec {}: {}", cmd, e), line, col })?;
             Ok((status.code().unwrap_or(1), None))
         }
@@ -947,6 +970,62 @@ impl<'a> Executor<'a> {
                 Err(PsError { message: msg, line, col })
             }
 
+            // Path functions.
+            "path.join" => {
+                let parts: Vec<String> = args.iter().map(|v| v.to_str()).collect();
+                let mut path = std::path::PathBuf::new();
+                for p in parts {
+                    path.push(p);
+                }
+                Ok(Some(Some(Value::Str(path.display().to_string()))))
+            }
+            "path.ext" => {
+                let s = args[0].to_str();
+                let p = std::path::Path::new(&s);
+                let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                Ok(Some(Some(Value::Str(ext))))
+            }
+            "path.stem" => {
+                let s = args[0].to_str();
+                let p = std::path::Path::new(&s);
+                let stem = p.file_stem().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                Ok(Some(Some(Value::Str(stem))))
+            }
+            "path.parent" => {
+                let s = args[0].to_str();
+                let p = std::path::Path::new(&s);
+                let parent = p.parent().map(|e| e.display().to_string()).unwrap_or_default();
+                Ok(Some(Some(Value::Str(parent))))
+            }
+            "path.exists" => {
+                Ok(Some(Some(Value::Bool(std::path::Path::new(&args[0].to_str()).exists()))))
+            }
+            "path.is_file" => {
+                Ok(Some(Some(Value::Bool(std::path::Path::new(&args[0].to_str()).is_file()))))
+            }
+            "path.is_dir" => {
+                Ok(Some(Some(Value::Bool(std::path::Path::new(&args[0].to_str()).is_dir()))))
+            }
+
+            // Filesystem functions.
+            "read" => {
+                let path = args[0].to_str();
+                let content = std::fs::read_to_string(&path).map_err(|e| {
+                    let (line, col) = self.pos();
+                    PsError { message: format!("read({}): {}", path, e), line, col }
+                })?;
+                Ok(Some(Some(Value::Str(content))))
+            }
+            "write" => {
+                let path = args[0].to_str();
+                let content = args[1].to_str();
+                std::fs::write(&path, &content).map_err(|e| {
+                    let (line, col) = self.pos();
+                    PsError { message: format!("write({}): {}", path, e), line, col }
+                })?;
+                Ok(Some(None))
+            }
+
             _ => Ok(None), // Not a builtin.
         }
     }
@@ -1049,6 +1128,45 @@ impl<'a> Executor<'a> {
         Ok((code, stdout))
     }
 
+    /// Parse optional command modifiers: `[ENV="val", stdin={expr}]`.
+    fn parse_cmd_modifiers(&mut self) -> Result<CmdModifiers, PsError> {
+        let mut modifiers = CmdModifiers::default();
+        // Peek: if next token is LBracket, parse modifiers.
+        if *self.peek_token()? != Token::LBracket {
+            return Ok(modifiers);
+        }
+        self.next_token()?; // consume [
+        loop {
+            if *self.peek_token()? == Token::RBracket {
+                self.next_token()?;
+                break;
+            }
+            if modifiers.env_vars.len() + modifiers.stdin_data.iter().count() > 0 {
+                self.expect(&Token::Comma)?;
+            }
+            let key = match self.next_token()? {
+                Token::Ident(s) => s,
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("expected modifier key, got {:?}", other),
+                        line, col,
+                    });
+                }
+            };
+            self.expect(&Token::Eq)?;
+            if key == "stdin" {
+                let val = self.parse_expr()?;
+                modifiers.stdin_data = Some(val.to_str());
+            } else {
+                // Environment variable.
+                let val = self.parse_expr()?;
+                modifiers.env_vars.push((key, val.to_str()));
+            }
+        }
+        Ok(modifiers)
+    }
+
     /// Check if the next token is `?` (error suppression). Consumes it if present.
     fn check_question_mark(&mut self) -> Result<bool, PsError> {
         if *self.peek_token()? == Token::Question {
@@ -1069,14 +1187,49 @@ impl<'a> Executor<'a> {
                     self.peeked = Some(tok);
                     break;
                 }
-                Token::BareWord(s) => args.push(s),
+                Token::BareWord(s) | Token::Ident(s) => args.push(s),
+                // Keywords that may appear as command names/args.
+                Token::True => args.push("true".into()),
+                Token::False => args.push("false".into()),
                 Token::StringLit(s) => args.push(s),
                 Token::StringInterp(segments) => {
                     let val = self.eval_interp_string(segments)?;
                     args.push(val.to_str());
                 }
                 Token::LBrace => {
-                    let val = self.parse_expr()?;
+                    // Read the identifier/expression.
+                    let val = self.parse_primary()?;
+                    // Check for spread: ... followed by }
+                    if *self.peek_token()? == Token::Dot {
+                        self.next_token()?;
+                        if *self.peek_token()? == Token::Dot {
+                            self.next_token()?;
+                            if *self.peek_token()? == Token::Dot {
+                                self.next_token()?;
+                                self.expect(&Token::RBrace)?;
+                                match val {
+                                    Value::List(items) => {
+                                        for item in items {
+                                            args.push(item.to_str());
+                                        }
+                                    }
+                                    _ => {
+                                        let (line, col) = self.pos();
+                                        return Err(PsError {
+                                            message: format!("cannot spread {}", val.type_name()),
+                                            line, col,
+                                        });
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                        let (line, col) = self.pos();
+                        return Err(PsError {
+                            message: "unexpected '.' in command args".into(),
+                            line, col,
+                        });
+                    }
                     self.expect(&Token::RBrace)?;
                     args.push(val.to_str());
                 }
@@ -1318,6 +1471,30 @@ impl<'a> Executor<'a> {
                             })
                         }
                     }
+                } else if name == "path" && *self.peek_token()? == Token::Dot {
+                    // path.func() namespace call.
+                    self.next_token()?; // consume '.'
+                    let func = match self.next_token()? {
+                        Token::Ident(s) => s,
+                        other => {
+                            let (line, col) = self.pos();
+                            return Err(PsError {
+                                message: format!("expected function name after 'path.', got {:?}", other),
+                                line, col,
+                            });
+                        }
+                    };
+                    let full_name = format!("path.{}", func);
+                    match self.call_function(&full_name)? {
+                        Some(val) => Ok(val),
+                        None => {
+                            let (line, col) = self.pos();
+                            Err(PsError {
+                                message: format!("path.{}() does not return a value", func),
+                                line, col,
+                            })
+                        }
+                    }
                 } else {
                     match self.scope.get(&name) {
                         Some(val) => Ok(val.clone()),
@@ -1461,6 +1638,12 @@ impl<'a> Executor<'a> {
         self.peeked = None; // Clear any leftover peeked token from the buffer.
         val
     }
+}
+
+#[derive(Default)]
+struct CmdModifiers {
+    env_vars: Vec<(String, String)>,
+    stdin_data: Option<String>,
 }
 
 enum MatchPattern {
