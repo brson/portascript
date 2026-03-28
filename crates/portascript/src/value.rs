@@ -1,3 +1,5 @@
+use indexmap::IndexMap;
+
 /// Runtime value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -6,6 +8,7 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     List(Vec<Value>),
+    Map(IndexMap<String, Value>),
 }
 
 impl Value {
@@ -19,6 +22,10 @@ impl Value {
             Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_str()).collect();
                 format!("[{}]", parts.join(", "))
+            }
+            Value::Map(m) => {
+                let parts: Vec<String> = m.iter().map(|(k, v)| format!("{}: {}", k, v.to_str())).collect();
+                format!("{{{}}}", parts.join(", "))
             }
         }
     }
@@ -80,6 +87,7 @@ impl Value {
             Value::Int(n) => *n != 0,
             Value::Float(f) => *f != 0.0,
             Value::List(items) => !items.is_empty(),
+            Value::Map(m) => !m.is_empty(),
         }
     }
 
@@ -91,6 +99,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Bool(_) => "bool",
             Value::List(_) => "list",
+            Value::Map(_) => "map",
         }
     }
 }

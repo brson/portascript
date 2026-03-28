@@ -2791,6 +2791,7 @@ name = "portascript"
 version = "0.1.0"
 dependencies = [
  "gag",
+ "indexmap",
  "os_pipe",
  "rustmax",
  "uu_echo",

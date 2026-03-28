@@ -44,6 +44,7 @@ pub enum Token {
     Fn,
     Return,
     Match,
+    Try,
     And,
     Or,
     Not,
@@ -62,6 +63,9 @@ pub enum Token {
     GtEq,
     Arrow,    // =>
     Colon,
+    Dot,
+    Question,
+    Pipe,
 
     /// A bare word in command mode (flags, paths, etc.).
     BareWord(String),
@@ -290,6 +294,7 @@ impl Tokenizer {
             "fn" => Token::Fn,
             "return" => Token::Return,
             "match" => Token::Match,
+            "try" => Token::Try,
             "and" => Token::And,
             "or" => Token::Or,
             "not" => Token::Not,
@@ -335,13 +340,21 @@ impl Tokenizer {
                 self.advance();
                 Ok(Token::RParen)
             }
+            Some('?') => {
+                self.advance();
+                Ok(Token::Question)
+            }
+            Some('|') => {
+                self.advance();
+                Ok(Token::Pipe)
+            }
             _ => {
                 // Read a bare word: anything that isn't whitespace, newline, or special chars.
                 let mut word = String::new();
                 while let Some(ch) = self.peek() {
                     if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'
                         || ch == '{' || ch == '"' || ch == '\'' || ch == '#'
-                        || ch == ')'
+                        || ch == ')' || ch == '?' || ch == '|'
                     {
                         break;
                     }
@@ -486,6 +499,18 @@ impl Tokenizer {
             Some(']') => {
                 self.advance();
                 Ok(Token::RBracket)
+            }
+            Some('.') => {
+                self.advance();
+                Ok(Token::Dot)
+            }
+            Some('?') => {
+                self.advance();
+                Ok(Token::Question)
+            }
+            Some('|') => {
+                self.advance();
+                Ok(Token::Pipe)
             }
             Some(ch) if ch.is_ascii_digit() => Ok(self.read_number()),
             Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => Ok(self.read_ident()),

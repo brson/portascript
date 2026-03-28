@@ -10,4 +10,5 @@ rmx.workspace = true
 uucore = "0.7.0"
 uu_echo = "0.7.0"
 os_pipe = "1"
+indexmap = "2"
 gag = "1"

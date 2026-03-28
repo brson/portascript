@@ -315,3 +315,48 @@ fn test_030_fn_return() {
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "7");
 }
+
+// --- Step 31: ? error suppression ---
+
+#[test]
+fn test_031_question_mark() {
+    let r = run_script("031_question_mark.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "survived");
+}
+
+// --- Step 32: try ---
+
+#[test]
+fn test_032_try() {
+    let r = run_script("032_try.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "false1");
+}
+
+// --- Step 33: try stdout ---
+
+#[test]
+fn test_033_try_stdout() {
+    let r = run_script("033_try_stdout.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello\n");
+}
+
+// --- Step 34: pipeline ---
+
+#[test]
+fn test_034_pipeline() {
+    let r = run_script("034_pipeline.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello\n");
+}
+
+// --- Step 35: pipeline capture ---
+
+#[test]
+fn test_035_pipeline_capture() {
+    let r = run_script("035_pipeline_capture.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "hello world");
+}

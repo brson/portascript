@@ -3,6 +3,8 @@ use crate::value::Value;
 use crate::scope::Scope;
 use crate::PsError;
 
+use indexmap::IndexMap;
+
 /// Control flow signal from block execution.
 enum ControlFlow {
     Normal,
@@ -242,8 +244,19 @@ impl<'a> Executor<'a> {
     }
 
     fn exec_run(&mut self) -> Result<(), PsError> {
-        let (code, _) = self.exec_run_inner(false)?;
-        if code != 0 {
+        let (code, output) = self.exec_run_inner(true)?;
+        let stdout_data = output.unwrap_or_default();
+
+        // Check for pipeline.
+        if *self.peek_token()? == Token::Pipe {
+            return self.exec_pipeline(stdout_data);
+        }
+
+        // Write captured output to real stdout.
+        write!(self.stdout, "{}", stdout_data).ok();
+
+        let suppress = self.check_question_mark()?;
+        if code != 0 && !suppress {
             let (line, col) = self.pos();
             return Err(PsError {
                 message: format!("run: exited with code {}", code),
@@ -281,8 +294,19 @@ impl<'a> Executor<'a> {
     }
 
     fn exec_exec(&mut self) -> Result<(), PsError> {
-        let (code, _) = self.exec_exec_inner(false)?;
-        if code != 0 {
+        let (code, output) = self.exec_exec_inner(true)?;
+        let stdout_data = output.unwrap_or_default();
+
+        // Check for pipeline.
+        if *self.peek_token()? == Token::Pipe {
+            return self.exec_pipeline(stdout_data);
+        }
+
+        // Write captured output to real stdout.
+        write!(self.stdout, "{}", stdout_data).ok();
+
+        let suppress = self.check_question_mark()?;
+        if code != 0 && !suppress {
             let (line, col) = self.pos();
             return Err(PsError {
                 message: format!("exec: exited with code {}", code),
@@ -740,14 +764,120 @@ impl<'a> Executor<'a> {
 
     // --- Command args ---
 
+    /// Execute a pipeline. `stdin_data` is the output of the first stage.
+    /// Subsequent stages are `| run/exec cmd...` separated by `|`.
+    fn exec_pipeline(&mut self, stdin_data: String) -> Result<(), PsError> {
+        let mut current_data = stdin_data;
+
+        loop {
+            // Consume the | token.
+            self.expect(&Token::Pipe)?;
+
+            let tok = self.next_token()?;
+            let (code, output) = match tok {
+                Token::Run => self.exec_run_pipeline(Some(&current_data))?,
+                Token::Exec => self.exec_exec_pipeline(Some(&current_data))?,
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("expected 'run' or 'exec' after '|', got {:?}", other),
+                        line, col,
+                    });
+                }
+            };
+
+            current_data = output;
+
+            // Check for more pipeline stages.
+            if *self.peek_token()? != Token::Pipe {
+                // End of pipeline. Write final output.
+                write!(self.stdout, "{}", current_data).ok();
+                let suppress = self.check_question_mark()?;
+                if code != 0 && !suppress {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("pipeline stage failed with code {}", code),
+                        line, col,
+                    });
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    /// Run a builtin as a pipeline stage with optional stdin data.
+    fn exec_run_pipeline(&mut self, _stdin_data: Option<&str>) -> Result<(i32, String), PsError> {
+        let name_tok = self.next_cmd_token()?;
+        let name = match name_tok {
+            Token::BareWord(s) | Token::Ident(s) => s,
+            other => {
+                let (line, col) = self.pos();
+                return Err(PsError {
+                    message: format!("expected builtin name after 'run', got {:?}", other),
+                    line, col,
+                });
+            }
+        };
+        let args = self.parse_cmd_args()?;
+        let (line, col) = self.pos();
+
+        // For pipeline builtins, we use capture mode and feed stdin.
+        // TODO: proper stdin feeding for builtins. For now just capture output.
+        match crate::builtins::run_builtin_capture(&name, args) {
+            Some((code, stdout)) => Ok((code, stdout)),
+            None => Err(PsError { message: format!("unknown builtin '{}'", name), line, col }),
+        }
+    }
+
+    /// Run an external command as a pipeline stage with optional stdin data.
+    fn exec_exec_pipeline(&mut self, stdin_data: Option<&str>) -> Result<(i32, String), PsError> {
+        let args = self.parse_cmd_args()?;
+        let (line, col) = self.pos();
+        if args.is_empty() {
+            return Err(PsError { message: "exec: missing command".into(), line, col });
+        }
+        let (cmd, cmd_args) = args.split_first().unwrap();
+
+        let mut child = std::process::Command::new(cmd)
+            .args(cmd_args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| PsError { message: format!("exec {}: {}", cmd, e), line, col })?;
+
+        // Feed stdin data.
+        if let Some(data) = stdin_data {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(data.as_bytes()).ok();
+            }
+        }
+
+        let output = child.wait_with_output()
+            .map_err(|e| PsError { message: format!("exec {}: {}", cmd, e), line, col })?;
+        let code = output.status.code().unwrap_or(1);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        Ok((code, stdout))
+    }
+
+    /// Check if the next token is `?` (error suppression). Consumes it if present.
+    fn check_question_mark(&mut self) -> Result<bool, PsError> {
+        if *self.peek_token()? == Token::Question {
+            self.next_token()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn parse_cmd_args(&mut self) -> Result<Vec<String>, PsError> {
         let mut args = Vec::new();
         loop {
             let tok = self.next_cmd_token()?;
             match tok {
                 Token::Newline | Token::Eof | Token::Comment(_) => break,
-                Token::RParen => {
-                    self.peeked = Some(Token::RParen);
+                Token::RParen | Token::Question | Token::Pipe => {
+                    self.peeked = Some(tok);
                     break;
                 }
                 Token::BareWord(s) => args.push(s),
@@ -833,7 +963,37 @@ impl<'a> Executor<'a> {
             let val = self.parse_unary()?;
             return Ok(Value::Bool(!val.is_truthy()));
         }
-        self.parse_primary()
+        let mut val = self.parse_primary()?;
+        // Postfix: dot access.
+        while *self.peek_token()? == Token::Dot {
+            self.next_token()?; // consume '.'
+            let field = match self.next_token()? {
+                Token::Ident(s) => s,
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("expected field name after '.', got {:?}", other),
+                        line, col,
+                    });
+                }
+            };
+            match val {
+                Value::Map(ref m) => {
+                    val = m.get(&field).cloned().ok_or_else(|| {
+                        let (line, col) = self.pos();
+                        PsError { message: format!("map has no field '{}'", field), line, col }
+                    })?;
+                }
+                _ => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("cannot access field '{}' on {}", field, val.type_name()),
+                        line, col,
+                    });
+                }
+            }
+        }
+        Ok(val)
     }
 
     fn parse_primary(&mut self) -> Result<Value, PsError> {
@@ -872,6 +1032,7 @@ impl<'a> Executor<'a> {
                 Ok(Value::List(items))
             }
             Token::DollarParen => self.parse_capture(),
+            Token::Try => self.parse_try(),
             Token::Ident(name) => {
                 if *self.peek_token()? == Token::LParen {
                     match self.call_function(&name)? {
@@ -909,7 +1070,7 @@ impl<'a> Executor<'a> {
 
     fn parse_capture(&mut self) -> Result<Value, PsError> {
         let tok = self.next_token()?;
-        let (code, captured) = match tok {
+        let (mut code, captured) = match tok {
             Token::Run => self.exec_run_inner(true)?,
             Token::Exec => self.exec_exec_inner(true)?,
             other => {
@@ -920,6 +1081,27 @@ impl<'a> Executor<'a> {
                 });
             }
         };
+        let mut current_data = captured.unwrap_or_default();
+
+        // Handle pipeline stages within $().
+        while *self.peek_token()? == Token::Pipe {
+            self.next_token()?; // consume |
+            let tok = self.next_token()?;
+            let (stage_code, stage_output) = match tok {
+                Token::Run => self.exec_run_pipeline(Some(&current_data))?,
+                Token::Exec => self.exec_exec_pipeline(Some(&current_data))?,
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("expected 'run' or 'exec' after '|', got {:?}", other),
+                        line, col,
+                    });
+                }
+            };
+            code = stage_code;
+            current_data = stage_output;
+        }
+
         self.expect(&Token::RParen)?;
         if code != 0 {
             let (line, col) = self.pos();
@@ -928,8 +1110,50 @@ impl<'a> Executor<'a> {
                 line, col,
             });
         }
-        let output = captured.unwrap_or_default();
-        Ok(Value::Str(output.trim_end().to_string()))
+        Ok(Value::Str(current_data.trim_end().to_string()))
+    }
+
+    /// Parse `try run/exec cmd` -- captures result as a map.
+    fn parse_try(&mut self) -> Result<Value, PsError> {
+        let tok = self.next_token()?;
+        let (mut code, captured) = match tok {
+            Token::Run => self.exec_run_inner(true)?,
+            Token::Exec => self.exec_exec_inner(true)?,
+            other => {
+                let (line, col) = self.pos();
+                return Err(PsError {
+                    message: format!("expected 'run' or 'exec' after 'try', got {:?}", other),
+                    line, col,
+                });
+            }
+        };
+        let mut current_data = captured.unwrap_or_default();
+
+        // Handle pipeline stages within try.
+        while *self.peek_token()? == Token::Pipe {
+            self.next_token()?;
+            let tok = self.next_token()?;
+            let (stage_code, stage_output) = match tok {
+                Token::Run => self.exec_run_pipeline(Some(&current_data))?,
+                Token::Exec => self.exec_exec_pipeline(Some(&current_data))?,
+                other => {
+                    let (line, col) = self.pos();
+                    return Err(PsError {
+                        message: format!("expected 'run' or 'exec' after '|', got {:?}", other),
+                        line, col,
+                    });
+                }
+            };
+            code = stage_code;
+            current_data = stage_output;
+        }
+
+        let mut map = IndexMap::new();
+        map.insert("ok".into(), Value::Bool(code == 0));
+        map.insert("code".into(), Value::Int(code as i64));
+        map.insert("stdout".into(), Value::Str(current_data));
+        map.insert("stderr".into(), Value::Str(String::new())); // TODO: capture stderr
+        Ok(Value::Map(map))
     }
 
     fn eval_interp_string(&mut self, segments: Vec<StringSegment>) -> Result<Value, PsError> {
