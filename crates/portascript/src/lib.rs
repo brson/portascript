@@ -22,6 +22,13 @@ impl std::fmt::Display for PsError {
 
 impl std::error::Error for PsError {}
 
+/// Run a uutils builtin directly in-process.
+///
+/// Used by the `--internal-builtin` CLI mode.
+pub fn run_builtin_direct(name: &str, args: &[String]) -> i32 {
+    builtins::run_direct(name, args)
+}
+
 /// Interpret a portascript source string.
 ///
 /// Returns the exit code.

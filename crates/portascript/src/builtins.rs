@@ -1,105 +1,99 @@
 use std::ffi::OsString;
-use std::io::Read;
+use std::process::{Command, Stdio};
 
-fn make_args(name: &str, args: Vec<String>) -> Vec<OsString> {
-    std::iter::once(OsString::from(name))
-        .chain(args.into_iter().map(OsString::from))
-        .collect()
+/// All known builtin names.
+const BUILTINS: &[&str] = &[
+    "echo", "cat", "true", "false", "ls", "cp", "sort", "head", "tail",
+    "mkdir", "rm", "mv", "chmod", "wc", "basename", "dirname", "touch",
+    "tr", "cut", "tee", "uniq", "seq", "yes", "printf",
+];
+
+/// Check if a name is a known builtin.
+pub fn is_builtin(name: &str) -> bool {
+    BUILTINS.contains(&name)
 }
 
-fn dispatch(name: &str, os_args: Vec<OsString>) -> Option<i32> {
-    match name {
-        "echo" => Some(uu_echo::uumain(os_args.into_iter())),
-        "cat" => Some(uu_cat::uumain(os_args.into_iter())),
-        "true" => Some(uu_true::uumain(os_args.into_iter())),
-        "false" => Some(uu_false::uumain(os_args.into_iter())),
-        "ls" => Some(uu_ls::uumain(os_args.into_iter())),
-        "cp" => Some(uu_cp::uumain(os_args.into_iter())),
-        "sort" => Some(uu_sort::uumain(os_args.into_iter())),
-        "head" => Some(uu_head::uumain(os_args.into_iter())),
-        "tail" => Some(uu_tail::uumain(os_args.into_iter())),
-        "mkdir" => Some(uu_mkdir::uumain(os_args.into_iter())),
-        "rm" => Some(uu_rm::uumain(os_args.into_iter())),
-        "mv" => Some(uu_mv::uumain(os_args.into_iter())),
-        "chmod" => Some(uu_chmod::uumain(os_args.into_iter())),
-        "wc" => Some(uu_wc::uumain(os_args.into_iter())),
-        "basename" => Some(uu_basename::uumain(os_args.into_iter())),
-        "dirname" => Some(uu_dirname::uumain(os_args.into_iter())),
-        "touch" => Some(uu_touch::uumain(os_args.into_iter())),
-        "tr" => Some(uu_tr::uumain(os_args.into_iter())),
-        "cut" => Some(uu_cut::uumain(os_args.into_iter())),
-        "tee" => Some(uu_tee::uumain(os_args.into_iter())),
-        "uniq" => Some(uu_uniq::uumain(os_args.into_iter())),
-        "seq" => Some(uu_seq::uumain(os_args.into_iter())),
-        "yes" => Some(uu_yes::uumain(os_args.into_iter())),
-        "printf" => Some(uu_printf::uumain(os_args.into_iter())),
-        _ => None,
-    }
-}
-
-/// Run a uutils builtin by name, writing to process stdout/stderr.
+/// Run a builtin by name via self-recursive subprocess.
+///
+/// Inherits stdin/stdout/stderr from the parent process (passthrough).
 pub fn run_builtin(name: &str, args: Vec<String>) -> Option<i32> {
-    dispatch(name, make_args(name, args))
+    if !is_builtin(name) {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let status = Command::new(exe)
+        .arg("--internal-builtin")
+        .arg(name)
+        .args(&args)
+        .status()
+        .ok()?;
+    Some(status.code().unwrap_or(1))
 }
 
-/// Run a uutils builtin, capturing stdout. Optionally feeds stdin data.
+/// Run a builtin, capturing stdout. Optionally feeds stdin data.
 pub fn run_builtin_capture(name: &str, args: Vec<String>, stdin_data: Option<&str>) -> Option<(i32, String)> {
-    let os_args = make_args(name, args);
+    if !is_builtin(name) {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("--internal-builtin")
+        .arg(name)
+        .args(&args)
+        .stdout(Stdio::piped());
 
-    // Set up stdout capture pipe.
-    let (mut stdout_reader, stdout_writer) = os_pipe::pipe().ok()?;
-    let stdout_writer_clone = stdout_writer.try_clone().ok()?;
+    if stdin_data.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
 
-    // Set up stdin pipe if needed.
-    let stdin_setup = if let Some(data) = stdin_data {
+    let mut child = cmd.spawn().ok()?;
+
+    if let Some(data) = stdin_data {
         use std::io::Write;
-        let (stdin_reader, mut stdin_writer) = os_pipe::pipe().ok()?;
-        stdin_writer.write_all(data.as_bytes()).ok()?;
-        drop(stdin_writer);
-        Some(stdin_reader)
-    } else {
-        None
-    };
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(data.as_bytes()).ok()?;
+        }
+    }
 
-    let code = {
-        // Redirect stdin if we have data.
-        let _stdin_guard = stdin_setup.map(|reader| redirect_stdin(reader));
-        let _stdout_guard = gag::Redirect::stdout(stdout_writer).ok()?;
-        drop(stdout_writer_clone);
-        dispatch(name, os_args)?
-    };
-
-    let mut output = String::new();
-    stdout_reader.read_to_string(&mut output).ok()?;
-    Some((code, output))
+    let output = child.wait_with_output().ok()?;
+    let code = output.status.code().unwrap_or(1);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    Some((code, stdout))
 }
 
-/// Redirect process stdin to read from the given file.
-/// Returns a guard that restores stdin on drop.
-fn redirect_stdin(file: os_pipe::PipeReader) -> StdinRedirectGuard {
-    use std::os::unix::io::AsRawFd;
-
-    let stdin_fd = 0;
-    // Save the original stdin fd.
-    let saved_fd = unsafe { libc::dup(stdin_fd) };
-    // Replace stdin with our pipe reader.
-    unsafe { libc::dup2(file.as_raw_fd(), stdin_fd) };
-    drop(file);
-
-    StdinRedirectGuard { saved_fd }
-}
-
-/// RAII guard that restores stdin on drop.
-struct StdinRedirectGuard {
-    saved_fd: i32,
-}
-
-impl Drop for StdinRedirectGuard {
-    fn drop(&mut self) {
-        let stdin_fd = 0;
-        unsafe {
-            libc::dup2(self.saved_fd, stdin_fd);
-            libc::close(self.saved_fd);
+/// Run a uutils builtin directly in-process.
+///
+/// Called from the `--internal-builtin` CLI mode.
+pub fn run_direct(name: &str, args: &[String]) -> i32 {
+    let os_args: Vec<OsString> = args.iter().map(|s| OsString::from(s)).collect();
+    match name {
+        "echo" => uu_echo::uumain(os_args.into_iter()),
+        "cat" => uu_cat::uumain(os_args.into_iter()),
+        "true" => uu_true::uumain(os_args.into_iter()),
+        "false" => uu_false::uumain(os_args.into_iter()),
+        "ls" => uu_ls::uumain(os_args.into_iter()),
+        "cp" => uu_cp::uumain(os_args.into_iter()),
+        "sort" => uu_sort::uumain(os_args.into_iter()),
+        "head" => uu_head::uumain(os_args.into_iter()),
+        "tail" => uu_tail::uumain(os_args.into_iter()),
+        "mkdir" => uu_mkdir::uumain(os_args.into_iter()),
+        "rm" => uu_rm::uumain(os_args.into_iter()),
+        "mv" => uu_mv::uumain(os_args.into_iter()),
+        "chmod" => uu_chmod::uumain(os_args.into_iter()),
+        "wc" => uu_wc::uumain(os_args.into_iter()),
+        "basename" => uu_basename::uumain(os_args.into_iter()),
+        "dirname" => uu_dirname::uumain(os_args.into_iter()),
+        "touch" => uu_touch::uumain(os_args.into_iter()),
+        "tr" => uu_tr::uumain(os_args.into_iter()),
+        "cut" => uu_cut::uumain(os_args.into_iter()),
+        "tee" => uu_tee::uumain(os_args.into_iter()),
+        "uniq" => uu_uniq::uumain(os_args.into_iter()),
+        "seq" => uu_seq::uumain(os_args.into_iter()),
+        "yes" => uu_yes::uumain(os_args.into_iter()),
+        "printf" => uu_printf::uumain(os_args.into_iter()),
+        _ => {
+            eprintln!("portascript: unknown builtin '{}'", name);
+            1
         }
     }
 }
