@@ -1,1 +1,1 @@
-run echo "hello" | exec cat
+run echo "hello" | exec sh -c "cat"

@@ -1,2 +1,2 @@
-let result = $(run echo "hello world" | exec cat)
+let result = $(run echo "hello world" | exec sh -c "cat")
 print(result)

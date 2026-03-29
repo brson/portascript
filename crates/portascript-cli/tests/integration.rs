@@ -624,3 +624,12 @@ fn test_063_pipeline_stdin() {
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "apple\nbanana\ncherry");
 }
+
+// --- Step 64: exec builtin error ---
+
+#[test]
+fn test_064_exec_builtin_error() {
+    let r = run_script("064_exec_builtin_error.psc");
+    assert_ne!(r.code, 0);
+    assert!(r.stderr.contains("use 'run echo'"), "stderr: {}", r.stderr);
+}

@@ -334,6 +334,13 @@ impl<'a> Executor<'a> {
         }
         let (cmd, cmd_args) = args.split_first().unwrap();
 
+        if crate::builtins::is_builtin(cmd) {
+            return Err(PsError {
+                message: format!("'{}' is a builtin -- use 'run {}' instead of 'exec {}'", cmd, cmd, cmd),
+                line, col,
+            });
+        }
+
         let needs_stdin = modifiers.stdin_data.is_some();
 
         let mut command = std::process::Command::new(cmd);
@@ -1165,6 +1172,13 @@ impl<'a> Executor<'a> {
             return Err(PsError { message: "exec: missing command".into(), line, col });
         }
         let (cmd, cmd_args) = args.split_first().unwrap();
+
+        if crate::builtins::is_builtin(cmd) {
+            return Err(PsError {
+                message: format!("'{}' is a builtin -- use 'run {}' instead of 'exec {}'", cmd, cmd, cmd),
+                line, col,
+            });
+        }
 
         let mut child = std::process::Command::new(cmd)
             .args(cmd_args)

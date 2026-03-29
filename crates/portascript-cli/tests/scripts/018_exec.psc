@@ -1,1 +1,1 @@
-exec echo "hello from exec"
+exec sh -c "echo hello from exec"
