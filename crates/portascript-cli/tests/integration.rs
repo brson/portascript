@@ -615,3 +615,12 @@ fn test_062_match_alternation() {
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "known");
 }
+
+// --- Step 63: pipeline with stdin-reading builtin ---
+
+#[test]
+fn test_063_pipeline_stdin() {
+    let r = run_script("063_pipeline_stdin.psc");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "apple\nbanana\ncherry");
+}

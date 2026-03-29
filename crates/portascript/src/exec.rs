@@ -289,7 +289,7 @@ impl<'a> Executor<'a> {
         let args = self.parse_cmd_args()?;
         let (line, col) = self.pos();
         if capture {
-            match crate::builtins::run_builtin_capture(&name, args) {
+            match crate::builtins::run_builtin_capture(&name, args, None) {
                 Some((code, stdout)) => Ok((code, Some(stdout))),
                 None => Err(PsError { message: format!("unknown builtin '{}'", name), line, col }),
             }
@@ -1136,7 +1136,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Run a builtin as a pipeline stage with optional stdin data.
-    fn exec_run_pipeline(&mut self, _stdin_data: Option<&str>) -> Result<(i32, String), PsError> {
+    fn exec_run_pipeline(&mut self, stdin_data: Option<&str>) -> Result<(i32, String), PsError> {
         let name_tok = self.next_cmd_token()?;
         let name = match name_tok {
             Token::BareWord(s) | Token::Ident(s) => s,
@@ -1151,9 +1151,7 @@ impl<'a> Executor<'a> {
         let args = self.parse_cmd_args()?;
         let (line, col) = self.pos();
 
-        // For pipeline builtins, we use capture mode and feed stdin.
-        // TODO: proper stdin feeding for builtins. For now just capture output.
-        match crate::builtins::run_builtin_capture(&name, args) {
+        match crate::builtins::run_builtin_capture(&name, args, stdin_data) {
             Some((code, stdout)) => Ok((code, stdout)),
             None => Err(PsError { message: format!("unknown builtin '{}'", name), line, col }),
         }

@@ -159,14 +159,14 @@ if path.is_dir(path.join(home, ".cargo")) {
 
 # Shared sccache directory
 let sccache_dir = path.join(home, ".cache/sccache")
-exec mkdir -p {sccache_dir}
+run mkdir -p {sccache_dir}
 mounts = append(mounts, "-v")
 mounts = append(mounts, "{sccache_dir}:/home/claude/.cache/sccache")
 
 # Shared file exchange directory
 let drop_dir_host = path.join(home, ".local/share/claude-sandbox/shared")
 let drop_dir_guest = "/home/claude/shared"
-exec mkdir -p {drop_dir_host}
+run mkdir -p {drop_dir_host}
 mounts = append(mounts, "-v")
 mounts = append(mounts, "{drop_dir_host}:{drop_dir_guest}")
 
@@ -339,7 +339,7 @@ if rebuild {
 }
 
 # Install chime assets into host ~/.local so they survive the bind-mount
-exec mkdir -p "{home}/.local/bin" "{home}/.local/share/sounds"
+run mkdir -p "{home}/.local/bin" "{home}/.local/share/sounds"
 exec cp "{script_dir}/claude-chime-notify.sh" "{home}/.local/bin/claude-chime-notify"
 exec chmod +x "{home}/.local/bin/claude-chime-notify"
 exec cp "{script_dir}/assets/chime.wav" "{home}/.local/share/sounds/chime.wav"
