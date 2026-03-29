@@ -1,10 +1,14 @@
 [workspace.package]
-description = "todo"
+description = "A cross-platform scripting language with bash-like command semantics and uutils builtins"
 version = "0.1.0"
 license = "Apache-2.0 OR MIT"
 authors = ["Brian Anderson <andersrb@gmail.com>"]
-documentation = "todo"
+repository = "https://github.com/brson/portascript"
+homepage = "https://github.com/brson/portascript"
 edition = "2024"
+rust-version = "1.85"
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["scripting", "shell", "bash", "uutils", "cross-platform"]
 
 [workspace]
 resolver = "2"
